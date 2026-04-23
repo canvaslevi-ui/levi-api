@@ -10,42 +10,19 @@ app.use(cors());
 /* 🔥 CONNECT DB */
 mongoose.connect(process.env.MONGO_URI)
 .then(()=>console.log("✅ MongoDB Connected"))
-.catch(err=>console.log("❌ DB Error:", err));
+.catch(err=>console.log(err));
 
-/* 🔥 DISTANCE FUNCTION */
-function getDistance(lat1, lon1, lat2, lon2){
-  const R = 6371;
-  const dLat = (lat2-lat1) * Math.PI/180;
-  const dLon = (lon2-lon1) * Math.PI/180;
-
-  const a =
-    Math.sin(dLat/2)*Math.sin(dLat/2) +
-    Math.cos(lat1*Math.PI/180) *
-    Math.cos(lat2*Math.PI/180) *
-    Math.sin(dLon/2)*Math.sin(dLon/2);
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c * 1000;
-}
-
-/* ===========================
-   🔥 SCHEMAS
-=========================== */
-
-/* STAFF */
+/* 🔥 STAFF */
 const Staff = mongoose.model("Staff", new mongoose.Schema({
   name:String,
   mobile:String,
   salary:Number,
   trackingEnabled:{type:Boolean,default:true},
-  workLocation:{
-    lat:Number,
-    lng:Number
-  },
+  workLocation:{lat:Number,lng:Number},
   createdAt:{type:Date,default:Date.now}
 }));
 
-/* ATTENDANCE */
+/* 🔥 ATTENDANCE */
 const Attendance = mongoose.model("Attendance", new mongoose.Schema({
   staffId:String,
   date:String,
@@ -56,69 +33,34 @@ const Attendance = mongoose.model("Attendance", new mongoose.Schema({
   lng:Number
 }));
 
-/* ===========================
-   🔥 STAFF ROUTES
-=========================== */
+/* ================= STAFF ================= */
 
-/* ADD STAFF */
 app.post("/staff", async(req,res)=>{
   try{
     const data = await Staff.create(req.body);
     res.json({success:true,data});
   }catch(err){
-    console.log(err);
-    res.status(500).json({success:false});
+    res.json({success:false});
   }
 });
 
-/* GET STAFF */
 app.get("/staff", async(req,res)=>{
-  try{
-    const data = await Staff.find();
-    res.json({success:true,data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
+  const data = await Staff.find();
+  res.json({success:true,data});
 });
 
-/* SET WORK LOCATION */
-app.put("/staff/:id/location", async(req,res)=>{
-  try{
-    await Staff.findByIdAndUpdate(req.params.id,{
-      workLocation:req.body
-    });
-    res.json({success:true});
-  }catch{
-    res.json({success:false});
-  }
-});
+/* ================= ATTENDANCE ================= */
 
-/* TOGGLE TRACKING */
-app.put("/staff/:id/tracking", async(req,res)=>{
-  try{
-    await Staff.findByIdAndUpdate(req.params.id,{
-      trackingEnabled:req.body.status
-    });
-    res.json({success:true});
-  }catch{
-    res.json({success:false});
-  }
-});
-
-/* ===========================
-   🔥 ATTENDANCE ROUTES
-=========================== */
-
-/* SAVE CHECK-IN / CHECKOUT */
 app.post("/attendance", async(req,res)=>{
   try{
     const {staffId,date,status,location,lat,lng} = req.body;
 
     let existing = await Attendance.findOne({staffId,date});
+    const time = new Date().toLocaleTimeString();
 
     if(status==="present"){
       if(existing){
-        existing.checkIn = new Date().toLocaleTimeString();
+        existing.checkIn = time;
         existing.location = location;
         existing.lat = lat;
         existing.lng = lng;
@@ -127,7 +69,7 @@ app.post("/attendance", async(req,res)=>{
         await Attendance.create({
           staffId,
           date,
-          checkIn:new Date().toLocaleTimeString(),
+          checkIn: time,
           location,
           lat,
           lng
@@ -137,7 +79,7 @@ app.post("/attendance", async(req,res)=>{
 
     if(status==="checkout"){
       if(existing){
-        existing.checkOut = new Date().toLocaleTimeString();
+        existing.checkOut = time;
         await existing.save();
       }
     }
@@ -146,74 +88,69 @@ app.post("/attendance", async(req,res)=>{
 
   }catch(err){
     console.log(err);
-    res.status(500).json({success:false});
+    res.json({success:false});
   }
 });
 
-/* GET ATTENDANCE */
 app.get("/attendance", async(req,res)=>{
-  try{
-    const {staffId} = req.query;
+  const {staffId} = req.query;
 
-    let data;
+  let data;
 
-    if(staffId){
-      data = await Attendance.find({staffId}).sort({date:-1});
-    }else{
-      data = await Attendance.find().sort({date:-1});
-    }
-
-    res.json({success:true,data});
-
-  }catch(err){
-    res.status(500).json({success:false});
+  if(staffId){
+    data = await Attendance.find({staffId}).sort({date:-1});
+  }else{
+    data = await Attendance.find().sort({date:-1});
   }
+
+  res.json({success:true,data});
 });
 
-/* ===========================
-   🔥 TRACKING ROUTE
-=========================== */
+/* ================= TRACK ================= */
+
+function getDistance(lat1, lon1, lat2, lon2){
+  const R = 6371;
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
+
+  const a =
+    Math.sin(dLat/2)**2 +
+    Math.cos(lat1*Math.PI/180) *
+    Math.cos(lat2*Math.PI/180) *
+    Math.sin(dLon/2)**2;
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c * 1000;
+}
 
 app.post("/track", async(req,res)=>{
-  try{
-    const {staffId,lat,lng} = req.body;
+  const {staffId,lat,lng} = req.body;
 
-    const staff = await Staff.findById(staffId);
-    if(!staff) return res.json({success:false});
+  const staff = await Staff.findById(staffId);
+  if(!staff) return res.json({success:false});
 
-    if(!staff.trackingEnabled){
-      return res.json({success:true,tracking:false});
-    }
-
-    if(!staff.workLocation){
-      return res.json({success:true,msg:"No base location"});
-    }
-
-    const distance = getDistance(
-      staff.workLocation.lat,
-      staff.workLocation.lng,
-      lat,
-      lng
-    );
-
-    let alert = false;
-
-    if(distance > 200){
-      alert = true;
-      console.log("🚨 OUT OF ZONE:", staff.name, distance);
-    }
-
-    res.json({success:true,distance,alert});
-
-  }catch(err){
-    console.log(err);
-    res.status(500).json({success:false});
+  if(!staff.trackingEnabled){
+    return res.json({success:true});
   }
+
+  if(!staff.workLocation){
+    return res.json({success:true});
+  }
+
+  const dist = getDistance(
+    staff.workLocation.lat,
+    staff.workLocation.lng,
+    lat,
+    lng
+  );
+
+  res.json({
+    success:true,
+    alert: dist > 200
+  });
 });
 
-/* ===========================
-   🚀 START SERVER
-=========================== */
+/* ================= START ================= */
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT,()=>console.log("🚀 Server running on", PORT));
+app.listen(PORT,()=>console.log("🚀 Server running",PORT));
