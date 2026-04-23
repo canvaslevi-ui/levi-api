@@ -9,10 +9,10 @@ app.use(cors());
 
 /* 🔥 MongoDB Connect */
 mongoose.connect(process.env.MONGO_URI)
-.then(()=>console.log("MongoDB Connected"))
+.then(()=>console.log("✅ MongoDB Connected"))
 .catch(err=>{
-  console.log("DB Error:", err);
-  process.exit(1);
+  console.log("❌ DB Error:", err.message);
+  // process.exit(1); ❌ अभी remove रखा है debug के लिए
 });
 
 /* ================== SCHEMAS ================== */
@@ -62,7 +62,8 @@ app.post("/staff", async (req,res)=>{
     const data = await Staff.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    res.status(400).json({success:false, error:err.message});
+    console.log("POST /staff ERROR:", err.message);
+    res.status(400).json({success:false, error: err.message});
   }
 });
 
@@ -71,7 +72,8 @@ app.get("/staff", async (req,res)=>{
     const data = await Staff.find();
     res.json({success:true, data});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("GET /staff ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
@@ -80,7 +82,8 @@ app.delete("/staff/:id", async (req,res)=>{
     await Staff.findByIdAndDelete(req.params.id);
     res.json({success:true});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("DELETE /staff ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
@@ -91,7 +94,8 @@ app.post("/attendance", async (req,res)=>{
     const data = await Attendance.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    res.status(400).json({success:false, error:err.message});
+    console.log("POST /attendance ERROR:", err.message);
+    res.status(400).json({success:false, error: err.message});
   }
 });
 
@@ -100,7 +104,8 @@ app.get("/attendance", async (req,res)=>{
     const data = await Attendance.find();
     res.json({success:true, data});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("GET /attendance ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
@@ -111,7 +116,8 @@ app.post("/leave", async (req,res)=>{
     const data = await Leave.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    res.status(400).json({success:false});
+    console.log("POST /leave ERROR:", err.message);
+    res.status(400).json({success:false, error: err.message});
   }
 });
 
@@ -120,7 +126,8 @@ app.get("/leave", async (req,res)=>{
     const data = await Leave.find();
     res.json({success:true, data});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("GET /leave ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
@@ -129,7 +136,8 @@ app.put("/leave/:id", async (req,res)=>{
     await Leave.findByIdAndUpdate(req.params.id, req.body);
     res.json({success:true});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("PUT /leave ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
@@ -140,7 +148,8 @@ app.post("/payment", async (req,res)=>{
     const data = await Payment.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    res.status(400).json({success:false});
+    console.log("POST /payment ERROR:", err.message);
+    res.status(400).json({success:false, error: err.message});
   }
 });
 
@@ -149,7 +158,8 @@ app.get("/payment", async (req,res)=>{
     const data = await Payment.find();
     res.json({success:true, data});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("GET /payment ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
@@ -158,11 +168,12 @@ app.put("/payment/:id", async (req,res)=>{
     await Payment.findByIdAndUpdate(req.params.id, req.body);
     res.json({success:true});
   }catch(err){
-    res.status(500).json({success:false});
+    console.log("PUT /payment ERROR:", err.message);
+    res.status(500).json({success:false, error: err.message});
   }
 });
 
 
 /* 🔌 PORT */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, ()=>console.log("Server running on", PORT));
+app.listen(PORT, ()=>console.log("🚀 Server running on", PORT));
