@@ -7,150 +7,122 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-/* 🔥 MongoDB Connect */
-mongoose.connect(process.env.MONGO_URI,{
-  useNewUrlParser:true,
-  useUnifiedTopology:true
-})
+/* 🔥 MongoDB */
+mongoose.connect(process.env.MONGO_URI)
 .then(()=>console.log("✅ MongoDB Connected"))
-.catch(err=>console.log("❌ DB Error:", err));
+.catch(err=>console.log(err));
 
-/* ================= SCHEMA ================= */
+/* 🔥 DISTANCE FUNCTION */
+function getDistance(lat1, lon1, lat2, lon2){
+  const R = 6371;
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
 
-// STAFF
+  const a =
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1*Math.PI/180) *
+    Math.cos(lat2*Math.PI/180) *
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c * 1000;
+}
+
+/* 🔥 STAFF SCHEMA */
 const staffSchema = new mongoose.Schema({
-  name: String,
-  mobile: String,
-  salary: Number,
-  createdAt: { type: Date, default: Date.now }
+  name:String,
+  mobile:String,
+  salary:Number,
+
+  trackingEnabled:{type:Boolean,default:true},
+  workLocation:{
+    lat:Number,
+    lng:Number
+  },
+
+  createdAt:{type:Date,default:Date.now}
 });
 const Staff = mongoose.model("Staff", staffSchema);
 
-// ATTENDANCE
-const attendanceSchema = new mongoose.Schema({
-  staffId: String,
-  date: String,
-  status: String
-});
-const Attendance = mongoose.model("Attendance", attendanceSchema);
+/* 🔥 ROUTES */
 
-// LEAVE
-const leaveSchema = new mongoose.Schema({
-  staffId: String,
-  reason: String,
-  status: { type: String, default: "pending" }
-});
-const Leave = mongoose.model("Leave", leaveSchema);
-
-// PAYMENT
-const paymentSchema = new mongoose.Schema({
-  staffId: String,
-  amount: Number,
-  status: { type: String, default: "pending" }
-});
-const Payment = mongoose.model("Payment", paymentSchema);
-
-
-/* ================= ROUTES ================= */
-
-// TEST
-app.get("/", (req,res)=> res.send("Levi API Running 🚀"));
-
-/* STAFF */
-app.post("/staff", async (req,res)=>{
+/* ADD STAFF */
+app.post("/staff", async(req,res)=>{
   try{
     const data = await Staff.create(req.body);
-    res.json({success:true, data});
+    res.json({success:true,data});
   }catch(err){
-    console.log(err);
-    res.status(500).json({success:false, error:err.message});
+    res.json({success:false});
   }
 });
 
-app.get("/staff", async (req,res)=>{
-  try{
-    const data = await Staff.find();
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false, error:err.message});
-  }
+/* GET STAFF */
+app.get("/staff", async(req,res)=>{
+  const data = await Staff.find();
+  res.json({success:true,data});
 });
 
-/* ATTENDANCE */
-app.post("/attendance", async (req,res)=>{
+/* SET WORK LOCATION */
+app.put("/staff/:id/location", async(req,res)=>{
   try{
-    const data = await Attendance.create(req.body);
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
-});
-
-app.get("/attendance", async (req,res)=>{
-  try{
-    const data = await Attendance.find();
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
-});
-
-/* LEAVE */
-app.post("/leave", async (req,res)=>{
-  try{
-    const data = await Leave.create(req.body);
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
-});
-
-app.get("/leave", async (req,res)=>{
-  try{
-    const data = await Leave.find();
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
-});
-
-app.put("/leave/:id", async (req,res)=>{
-  try{
-    await Leave.findByIdAndUpdate(req.params.id, req.body);
+    await Staff.findByIdAndUpdate(req.params.id,{
+      workLocation:req.body
+    });
     res.json({success:true});
-  }catch(err){
-    res.status(500).json({success:false});
+  }catch{
+    res.json({success:false});
   }
 });
 
-/* PAYMENT */
-app.post("/payment", async (req,res)=>{
+/* TOGGLE TRACKING */
+app.put("/staff/:id/tracking", async(req,res)=>{
   try{
-    const data = await Payment.create(req.body);
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
-});
-
-app.get("/payment", async (req,res)=>{
-  try{
-    const data = await Payment.find();
-    res.json({success:true, data});
-  }catch(err){
-    res.status(500).json({success:false});
-  }
-});
-
-app.put("/payment/:id", async (req,res)=>{
-  try{
-    await Payment.findByIdAndUpdate(req.params.id, req.body);
+    await Staff.findByIdAndUpdate(req.params.id,{
+      trackingEnabled:req.body.status
+    });
     res.json({success:true});
+  }catch{
+    res.json({success:false});
+  }
+});
+
+/* 🔥 TRACK USER */
+app.post("/track", async(req,res)=>{
+  try{
+    const {staffId,lat,lng} = req.body;
+
+    const staff = await Staff.findById(staffId);
+    if(!staff) return res.json({success:false});
+
+    if(!staff.trackingEnabled){
+      return res.json({success:true,tracking:false});
+    }
+
+    if(!staff.workLocation){
+      return res.json({success:true,msg:"No base location"});
+    }
+
+    const distance = getDistance(
+      staff.workLocation.lat,
+      staff.workLocation.lng,
+      lat,
+      lng
+    );
+
+    let alert=false;
+
+    if(distance>200){
+      alert=true;
+      console.log("🚨 OUT OF ZONE:", staff.name, distance);
+    }
+
+    res.json({success:true,distance,alert});
+
   }catch(err){
-    res.status(500).json({success:false});
+    res.json({success:false});
   }
 });
 
 /* PORT */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, ()=>console.log("🚀 Server running on", PORT));
+app.listen(PORT,()=>console.log("🚀 Server running",PORT));
