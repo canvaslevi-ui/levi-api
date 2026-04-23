@@ -12,7 +12,34 @@ mongoose.connect(process.env.MONGO_URI)
 .then(()=>console.log("✅ MongoDB Connected"))
 .catch(err=>console.log(err));
 
-/* 🔥 STAFF */
+/* 🔥 IST TIME FUNCTION */
+function getISTTime(){
+  return new Date().toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+/* 🔥 DISTANCE */
+function getDistance(lat1, lon1, lat2, lon2){
+  const R = 6371;
+  const dLat = (lat2-lat1) * Math.PI/180;
+  const dLon = (lon2-lon1) * Math.PI/180;
+
+  const a =
+    Math.sin(dLat/2)**2 +
+    Math.cos(lat1*Math.PI/180) *
+    Math.cos(lat2*Math.PI/180) *
+    Math.sin(dLon/2)**2;
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c * 1000;
+}
+
+/* ================= SCHEMAS ================= */
+
 const Staff = mongoose.model("Staff", new mongoose.Schema({
   name:String,
   mobile:String,
@@ -22,7 +49,6 @@ const Staff = mongoose.model("Staff", new mongoose.Schema({
   createdAt:{type:Date,default:Date.now}
 }));
 
-/* 🔥 ATTENDANCE */
 const Attendance = mongoose.model("Attendance", new mongoose.Schema({
   staffId:String,
   date:String,
@@ -33,13 +59,30 @@ const Attendance = mongoose.model("Attendance", new mongoose.Schema({
   lng:Number
 }));
 
+const Payment = mongoose.model("Payment", new mongoose.Schema({
+  staffId:String,
+  amount:Number,
+  reason:String,
+  status:{type:String,default:"pending"},
+  createdAt:{type:Date,default:Date.now}
+}));
+
+const Leave = mongoose.model("Leave", new mongoose.Schema({
+  staffId:String,
+  from:String,
+  to:String,
+  reason:String,
+  status:{type:String,default:"pending"},
+  createdAt:{type:Date,default:Date.now}
+}));
+
 /* ================= STAFF ================= */
 
 app.post("/staff", async(req,res)=>{
   try{
     const data = await Staff.create(req.body);
     res.json({success:true,data});
-  }catch(err){
+  }catch{
     res.json({success:false});
   }
 });
@@ -56,7 +99,7 @@ app.post("/attendance", async(req,res)=>{
     const {staffId,date,status,location,lat,lng} = req.body;
 
     let existing = await Attendance.findOne({staffId,date});
-    const time = new Date().toLocaleTimeString();
+    const time = getISTTime();
 
     if(status==="present"){
       if(existing){
@@ -88,7 +131,7 @@ app.post("/attendance", async(req,res)=>{
 
   }catch(err){
     console.log(err);
-    res.json({success:false});
+    res.status(500).json({success:false});
   }
 });
 
@@ -106,22 +149,31 @@ app.get("/attendance", async(req,res)=>{
   res.json({success:true,data});
 });
 
+/* ================= PAYMENT ================= */
+
+app.post("/payment", async(req,res)=>{
+  const data = await Payment.create(req.body);
+  res.json({success:true,data});
+});
+
+app.get("/payment", async(req,res)=>{
+  const data = await Payment.find({staffId:req.query.staffId});
+  res.json({success:true,data});
+});
+
+/* ================= LEAVE ================= */
+
+app.post("/leave", async(req,res)=>{
+  const data = await Leave.create(req.body);
+  res.json({success:true,data});
+});
+
+app.get("/leave", async(req,res)=>{
+  const data = await Leave.find({staffId:req.query.staffId});
+  res.json({success:true,data});
+});
+
 /* ================= TRACK ================= */
-
-function getDistance(lat1, lon1, lat2, lon2){
-  const R = 6371;
-  const dLat = (lat2-lat1) * Math.PI/180;
-  const dLon = (lon2-lon1) * Math.PI/180;
-
-  const a =
-    Math.sin(dLat/2)**2 +
-    Math.cos(lat1*Math.PI/180) *
-    Math.cos(lat2*Math.PI/180) *
-    Math.sin(dLon/2)**2;
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c * 1000;
-}
 
 app.post("/track", async(req,res)=>{
   const {staffId,lat,lng} = req.body;
@@ -129,11 +181,7 @@ app.post("/track", async(req,res)=>{
   const staff = await Staff.findById(staffId);
   if(!staff) return res.json({success:false});
 
-  if(!staff.trackingEnabled){
-    return res.json({success:true});
-  }
-
-  if(!staff.workLocation){
+  if(!staff.trackingEnabled || !staff.workLocation){
     return res.json({success:true});
   }
 
@@ -153,4 +201,4 @@ app.post("/track", async(req,res)=>{
 /* ================= START ================= */
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT,()=>console.log("🚀 Server running",PORT));
+app.listen(PORT,()=>console.log("🚀 Server running on", PORT));
