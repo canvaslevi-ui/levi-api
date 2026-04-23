@@ -8,53 +8,53 @@ app.use(express.json());
 app.use(cors());
 
 /* 🔥 MongoDB Connect */
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(process.env.MONGO_URI,{
+  useNewUrlParser:true,
+  useUnifiedTopology:true
+})
 .then(()=>console.log("✅ MongoDB Connected"))
-.catch(err=>{
-  console.log("❌ DB Error:", err.message);
-  // process.exit(1); ❌ अभी remove रखा है debug के लिए
-});
+.catch(err=>console.log("❌ DB Error:", err));
 
-/* ================== SCHEMAS ================== */
+/* ================= SCHEMA ================= */
 
 // STAFF
 const staffSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  role: { type: String, required: true },
-  salary: { type: Number, required: true },
+  name: String,
+  mobile: String,
+  salary: Number,
   createdAt: { type: Date, default: Date.now }
 });
 const Staff = mongoose.model("Staff", staffSchema);
 
 // ATTENDANCE
 const attendanceSchema = new mongoose.Schema({
-  staffId: { type: String, required: true },
-  date: { type: String, required: true },
-  status: { type: String, required: true }
+  staffId: String,
+  date: String,
+  status: String
 });
 const Attendance = mongoose.model("Attendance", attendanceSchema);
 
 // LEAVE
 const leaveSchema = new mongoose.Schema({
-  staffId: { type: String, required: true },
-  reason: { type: String, required: true },
+  staffId: String,
+  reason: String,
   status: { type: String, default: "pending" }
 });
 const Leave = mongoose.model("Leave", leaveSchema);
 
 // PAYMENT
 const paymentSchema = new mongoose.Schema({
-  staffId: { type: String, required: true },
-  amount: { type: Number, required: true },
+  staffId: String,
+  amount: Number,
   status: { type: String, default: "pending" }
 });
 const Payment = mongoose.model("Payment", paymentSchema);
 
 
-/* ================== ROUTES ================== */
+/* ================= ROUTES ================= */
 
 // TEST
-app.get("/", (req,res)=> res.send("Levi API Pro Running 🚀"));
+app.get("/", (req,res)=> res.send("Levi API Running 🚀"));
 
 /* STAFF */
 app.post("/staff", async (req,res)=>{
@@ -62,8 +62,8 @@ app.post("/staff", async (req,res)=>{
     const data = await Staff.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    console.log("POST /staff ERROR:", err.message);
-    res.status(400).json({success:false, error: err.message});
+    console.log(err);
+    res.status(500).json({success:false, error:err.message});
   }
 });
 
@@ -72,21 +72,9 @@ app.get("/staff", async (req,res)=>{
     const data = await Staff.find();
     res.json({success:true, data});
   }catch(err){
-    console.log("GET /staff ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
+    res.status(500).json({success:false, error:err.message});
   }
 });
-
-app.delete("/staff/:id", async (req,res)=>{
-  try{
-    await Staff.findByIdAndDelete(req.params.id);
-    res.json({success:true});
-  }catch(err){
-    console.log("DELETE /staff ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
-  }
-});
-
 
 /* ATTENDANCE */
 app.post("/attendance", async (req,res)=>{
@@ -94,8 +82,7 @@ app.post("/attendance", async (req,res)=>{
     const data = await Attendance.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    console.log("POST /attendance ERROR:", err.message);
-    res.status(400).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
 
@@ -104,11 +91,9 @@ app.get("/attendance", async (req,res)=>{
     const data = await Attendance.find();
     res.json({success:true, data});
   }catch(err){
-    console.log("GET /attendance ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
-
 
 /* LEAVE */
 app.post("/leave", async (req,res)=>{
@@ -116,8 +101,7 @@ app.post("/leave", async (req,res)=>{
     const data = await Leave.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    console.log("POST /leave ERROR:", err.message);
-    res.status(400).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
 
@@ -126,8 +110,7 @@ app.get("/leave", async (req,res)=>{
     const data = await Leave.find();
     res.json({success:true, data});
   }catch(err){
-    console.log("GET /leave ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
 
@@ -136,11 +119,9 @@ app.put("/leave/:id", async (req,res)=>{
     await Leave.findByIdAndUpdate(req.params.id, req.body);
     res.json({success:true});
   }catch(err){
-    console.log("PUT /leave ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
-
 
 /* PAYMENT */
 app.post("/payment", async (req,res)=>{
@@ -148,8 +129,7 @@ app.post("/payment", async (req,res)=>{
     const data = await Payment.create(req.body);
     res.json({success:true, data});
   }catch(err){
-    console.log("POST /payment ERROR:", err.message);
-    res.status(400).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
 
@@ -158,8 +138,7 @@ app.get("/payment", async (req,res)=>{
     const data = await Payment.find();
     res.json({success:true, data});
   }catch(err){
-    console.log("GET /payment ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
 
@@ -168,12 +147,10 @@ app.put("/payment/:id", async (req,res)=>{
     await Payment.findByIdAndUpdate(req.params.id, req.body);
     res.json({success:true});
   }catch(err){
-    console.log("PUT /payment ERROR:", err.message);
-    res.status(500).json({success:false, error: err.message});
+    res.status(500).json({success:false});
   }
 });
 
-
-/* 🔌 PORT */
+/* PORT */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=>console.log("🚀 Server running on", PORT));
