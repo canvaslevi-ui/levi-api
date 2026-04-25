@@ -1,204 +1,157 @@
+// server.js
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
-require("dotenv").config();
+const path = require("path");
 
 const app = express();
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
+app.use(express.static("public"));
 
-/* 🔥 CONNECT DB */
-mongoose.connect(process.env.MONGO_URI)
-.then(()=>console.log("✅ MongoDB Connected"))
+/* =========================
+   CONFIG
+========================= */
+const PORT = 3000;
+const ADMIN_USER = "levi";
+const ADMIN_PASS = "7888";
+
+/* =========================
+   MONGODB CONNECT
+========================= */
+mongoose.connect("mongodb://127.0.0.1:27017/leviinteriors")
+.then(()=>console.log("MongoDB Connected"))
 .catch(err=>console.log(err));
 
-/* 🔥 IST TIME FUNCTION */
-function getISTTime(){
-  return new Date().toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  });
-}
-
-/* 🔥 DISTANCE */
-function getDistance(lat1, lon1, lat2, lon2){
-  const R = 6371;
-  const dLat = (lat2-lat1) * Math.PI/180;
-  const dLon = (lon2-lon1) * Math.PI/180;
-
-  const a =
-    Math.sin(dLat/2)**2 +
-    Math.cos(lat1*Math.PI/180) *
-    Math.cos(lat2*Math.PI/180) *
-    Math.sin(dLon/2)**2;
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c * 1000;
-}
-
-/* ================= SCHEMAS ================= */
-
-const Staff = mongoose.model("Staff", new mongoose.Schema({
+/* =========================
+   SCHEMAS
+========================= */
+const StaffSchema = new mongoose.Schema({
   name:String,
   mobile:String,
-  salary:Number,
-  trackingEnabled:{type:Boolean,default:true},
-  workLocation:{lat:Number,lng:Number},
-  createdAt:{type:Date,default:Date.now}
-}));
+  salary:Number
+},{timestamps:true});
 
-const Attendance = mongoose.model("Attendance", new mongoose.Schema({
+const AttendanceSchema = new mongoose.Schema({
   staffId:String,
+  name:String,
   date:String,
   checkIn:String,
   checkOut:String,
-  location:String,
-  lat:Number,
-  lng:Number
-}));
+  location:String
+},{timestamps:true});
 
-const Payment = mongoose.model("Payment", new mongoose.Schema({
+const LeaveSchema = new mongoose.Schema({
   staffId:String,
-  amount:Number,
-  reason:String,
-  status:{type:String,default:"pending"},
-  createdAt:{type:Date,default:Date.now}
-}));
-
-const Leave = mongoose.model("Leave", new mongoose.Schema({
-  staffId:String,
+  name:String,
   from:String,
   to:String,
   reason:String,
-  status:{type:String,default:"pending"},
-  createdAt:{type:Date,default:Date.now}
-}));
+  status:{type:String,default:"pending"}
+},{timestamps:true});
 
-/* ================= STAFF ================= */
+const PaymentSchema = new mongoose.Schema({
+  staffId:String,
+  name:String,
+  amount:Number,
+  reason:String,
+  status:{type:String,default:"pending"}
+},{timestamps:true});
 
-app.post("/staff", async(req,res)=>{
-  try{
-    const data = await Staff.create(req.body);
-    res.json({success:true,data});
-  }catch{
-    res.json({success:false});
-  }
-});
+const Staff = mongoose.model("Staff", StaffSchema);
+const Attendance = mongoose.model("Attendance", AttendanceSchema);
+const Leave = mongoose.model("Leave", LeaveSchema);
+const Payment = mongoose.model("Payment", PaymentSchema);
 
-app.get("/staff", async(req,res)=>{
-  const data = await Staff.find();
-  res.json({success:true,data});
-});
+/* =========================
+   ADMIN LOGIN
+========================= */
+app.post("/api/login",(req,res)=>{
+  const {username,password}=req.body;
 
-/* ================= ATTENDANCE ================= */
-
-app.post("/attendance", async(req,res)=>{
-  try{
-    const {staffId,date,status,location,lat,lng} = req.body;
-
-    let existing = await Attendance.findOne({staffId,date});
-    const time = getISTTime();
-
-    if(status==="present"){
-      if(existing){
-        existing.checkIn = time;
-        existing.location = location;
-        existing.lat = lat;
-        existing.lng = lng;
-        await existing.save();
-      }else{
-        await Attendance.create({
-          staffId,
-          date,
-          checkIn: time,
-          location,
-          lat,
-          lng
-        });
-      }
-    }
-
-    if(status==="checkout"){
-      if(existing){
-        existing.checkOut = time;
-        await existing.save();
-      }
-    }
-
-    res.json({success:true});
-
-  }catch(err){
-    console.log(err);
-    res.status(500).json({success:false});
-  }
-});
-
-app.get("/attendance", async(req,res)=>{
-  const {staffId} = req.query;
-
-  let data;
-
-  if(staffId){
-    data = await Attendance.find({staffId}).sort({date:-1});
-  }else{
-    data = await Attendance.find().sort({date:-1});
-  }
-
-  res.json({success:true,data});
-});
-
-/* ================= PAYMENT ================= */
-
-app.post("/payment", async(req,res)=>{
-  const data = await Payment.create(req.body);
-  res.json({success:true,data});
-});
-
-app.get("/payment", async(req,res)=>{
-  const data = await Payment.find({staffId:req.query.staffId});
-  res.json({success:true,data});
-});
-
-/* ================= LEAVE ================= */
-
-app.post("/leave", async(req,res)=>{
-  const data = await Leave.create(req.body);
-  res.json({success:true,data});
-});
-
-app.get("/leave", async(req,res)=>{
-  const data = await Leave.find({staffId:req.query.staffId});
-  res.json({success:true,data});
-});
-
-/* ================= TRACK ================= */
-
-app.post("/track", async(req,res)=>{
-  const {staffId,lat,lng} = req.body;
-
-  const staff = await Staff.findById(staffId);
-  if(!staff) return res.json({success:false});
-
-  if(!staff.trackingEnabled || !staff.workLocation){
+  if(username===ADMIN_USER && password===ADMIN_PASS){
     return res.json({success:true});
   }
 
-  const dist = getDistance(
-    staff.workLocation.lat,
-    staff.workLocation.lng,
-    lat,
-    lng
-  );
+  res.json({success:false,message:"Invalid Login"});
+});
+
+/* =========================
+   DASHBOARD
+========================= */
+app.get("/api/dashboard", async(req,res)=>{
+  const totalStaff = await Staff.countDocuments();
+  const pendingLeave = await Leave.countDocuments({status:"pending"});
+  const pendingPayment = await Payment.countDocuments({status:"pending"});
+  const today = new Date().toISOString().split("T")[0];
+  const present = await Attendance.countDocuments({date:today});
 
   res.json({
-    success:true,
-    alert: dist > 200
+    totalStaff,
+    present,
+    pendingLeave,
+    pendingPayment
   });
 });
 
-/* ================= START ================= */
+/* =========================
+   STAFF CRUD
+========================= */
+app.get("/api/staff", async(req,res)=>{
+  const data = await Staff.find().sort({_id:-1});
+  res.json(data);
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT,()=>console.log("🚀 Server running on", PORT));
+app.post("/api/staff", async(req,res)=>{
+  await Staff.create(req.body);
+  res.json({success:true});
+});
+
+app.put("/api/staff/:id", async(req,res)=>{
+  await Staff.findByIdAndUpdate(req.params.id,req.body);
+  res.json({success:true});
+});
+
+app.delete("/api/staff/:id", async(req,res)=>{
+  await Staff.findByIdAndDelete(req.params.id);
+  res.json({success:true});
+});
+
+/* =========================
+   ATTENDANCE
+========================= */
+app.get("/api/attendance", async(req,res)=>{
+  const data = await Attendance.find().sort({_id:-1});
+  res.json(data);
+});
+
+/* =========================
+   LEAVE
+========================= */
+app.get("/api/leave", async(req,res)=>{
+  const data = await Leave.find().sort({_id:-1});
+  res.json(data);
+});
+
+app.put("/api/leave/:id", async(req,res)=>{
+  await Leave.findByIdAndUpdate(req.params.id,{status:req.body.status});
+  res.json({success:true});
+});
+
+/* =========================
+   PAYMENT
+========================= */
+app.get("/api/payment", async(req,res)=>{
+  const data = await Payment.find().sort({_id:-1});
+  res.json(data);
+});
+
+app.put("/api/payment/:id", async(req,res)=>{
+  await Payment.findByIdAndUpdate(req.params.id,{status:req.body.status});
+  res.json({success:true});
+});
+
+/* ========================= */
+app.listen(PORT,()=>{
+  console.log("Server Running http://localhost:"+PORT);
+});
