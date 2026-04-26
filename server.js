@@ -84,28 +84,43 @@ status:{type:String,default:"pending"},
 createdAt:{type:Date,default:Date.now}
 }));
 
+const Setting = mongoose.model("Setting", new mongoose.Schema({
+companyName:{type:String,default:"Levi Interiors"},
+ownerName:String,
+phone:String,
+address:String,
+startTime:String,
+lateTime:String,
+radius:{type:Number,default:200},
+salaryDate:String,
+advanceLimit:{type:Number,default:0},
+payReq:{type:Boolean,default:true},
+leaveReq:{type:Boolean,default:true},
+tracking:{type:Boolean,default:true},
+relogin:{type:Boolean,default:false},
+adminPassword:{type:String,default:"1234"},
+updatedAt:{type:Date,default:Date.now}
+}));
+
 /* ================= STAFF ================= */
 
-/* ADD STAFF */
 app.post("/staff", async(req,res)=>{
 try{
-const data = await Staff.create(req.body);
+const data=await Staff.create(req.body);
 res.json({success:true,data});
 }catch(err){
 res.status(500).json({success:false});
 }
 });
 
-/* GET STAFF */
 app.get("/staff", async(req,res)=>{
-const data = await Staff.find().sort({_id:-1});
+const data=await Staff.find().sort({_id:-1});
 res.json({success:true,data});
 });
 
-/* EDIT STAFF */
 app.put("/staff/:id", async(req,res)=>{
 try{
-const data = await Staff.findByIdAndUpdate(
+const data=await Staff.findByIdAndUpdate(
 req.params.id,
 req.body,
 {new:true}
@@ -116,7 +131,6 @@ res.status(500).json({success:false});
 }
 });
 
-/* DELETE STAFF */
 app.delete("/staff/:id", async(req,res)=>{
 try{
 await Staff.findByIdAndDelete(req.params.id);
@@ -126,7 +140,6 @@ res.status(500).json({success:false});
 }
 });
 
-/* TRACKING */
 app.put("/staff/:id/tracking", async(req,res)=>{
 try{
 await Staff.findByIdAndUpdate(req.params.id,{
@@ -138,7 +151,6 @@ res.status(500).json({success:false});
 }
 });
 
-/* LOCATION */
 app.put("/staff/:id/location", async(req,res)=>{
 try{
 await Staff.findByIdAndUpdate(req.params.id,{
@@ -152,15 +164,13 @@ res.status(500).json({success:false});
 
 /* ================= ATTENDANCE ================= */
 
-/* CHECK IN / OUT */
 app.post("/attendance", async(req,res)=>{
-
 try{
 
-const {staffId,date,status,location,lat,lng} = req.body;
+const {staffId,date,status,location,lat,lng}=req.body;
 
-let existing = await Attendance.findOne({staffId,date});
-const time = getISTTime();
+let existing=await Attendance.findOne({staffId,date});
+const time=getISTTime();
 
 if(status==="present"){
 
@@ -200,73 +210,76 @@ await existing.save();
 res.json({success:true});
 
 }catch(err){
-console.log(err);
 res.status(500).json({success:false});
 }
-
 });
 
-/* GET ATTENDANCE */
 app.get("/attendance", async(req,res)=>{
-
-const {staffId} = req.query;
 
 let data;
 
-if(staffId){
-data = await Attendance.find({staffId}).sort({date:-1});
+if(req.query.staffId){
+data=await Attendance.find({
+staffId:req.query.staffId
+}).sort({date:-1});
 }else{
-data = await Attendance.find().sort({date:-1});
+data=await Attendance.find().sort({date:-1});
 }
 
 res.json({success:true,data});
-
 });
 
 /* ================= PAYMENT ================= */
 
-/* CREATE REQUEST */
 app.post("/payment", async(req,res)=>{
 try{
-const data = await Payment.create(req.body);
+
+const setting=await Setting.findOne();
+
+if(setting && setting.payReq===false){
+return res.json({
+success:false,
+message:"Payment requests disabled"
+});
+}
+
+const data=await Payment.create(req.body);
 res.json({success:true,data});
+
 }catch(err){
 res.status(500).json({success:false});
 }
 });
 
-/* GET PAYMENT */
 app.get("/payment", async(req,res)=>{
 
 let data;
 
 if(req.query.staffId){
-data = await Payment.find({
+data=await Payment.find({
 staffId:req.query.staffId
 }).sort({createdAt:-1});
 }else{
-data = await Payment.find().sort({createdAt:-1});
+data=await Payment.find().sort({createdAt:-1});
 }
 
 res.json({success:true,data});
-
 });
 
-/* APPROVE / REJECT / UPDATE */
 app.put("/payment/:id", async(req,res)=>{
 try{
 
-const body = req.body || {};
+const body=req.body||{};
 
 if(body.status==="paid" && !body.approvedAt){
-body.approvedAt = new Date().toLocaleDateString("en-IN");
+body.approvedAt=new Date().toLocaleDateString("en-IN");
 }
 
 if(body.status==="paid" && !body.approvedBy){
-body.approvedBy = "Admin";
+body.approvedBy="Admin";
 }
 
-const data = await Payment.findByIdAndUpdate(
+const data=await Payment.findByIdAndUpdate(
 req.params.id,
 body,
 {new:true}
@@ -279,7 +292,6 @@ res.status(500).json({success:false});
 }
 });
 
-/* DELETE PAYMENT */
 app.delete("/payment/:id", async(req,res)=>{
 try{
 await Payment.findByIdAndDelete(req.params.id);
@@ -291,37 +303,44 @@ res.status(500).json({success:false});
 
 /* ================= LEAVE ================= */
 
-/* CREATE LEAVE */
 app.post("/leave", async(req,res)=>{
 try{
-const data = await Leave.create(req.body);
+
+const setting=await Setting.findOne();
+
+if(setting && setting.leaveReq===false){
+return res.json({
+success:false,
+message:"Leave requests disabled"
+});
+}
+
+const data=await Leave.create(req.body);
 res.json({success:true,data});
+
 }catch(err){
 res.status(500).json({success:false});
 }
 });
 
-/* GET LEAVE */
 app.get("/leave", async(req,res)=>{
 
 let data;
 
 if(req.query.staffId){
-data = await Leave.find({
+data=await Leave.find({
 staffId:req.query.staffId
 }).sort({createdAt:-1});
 }else{
-data = await Leave.find().sort({createdAt:-1});
+data=await Leave.find().sort({createdAt:-1});
 }
 
 res.json({success:true,data});
-
 });
 
-/* UPDATE LEAVE */
 app.put("/leave/:id", async(req,res)=>{
 try{
-const data = await Leave.findByIdAndUpdate(
+const data=await Leave.findByIdAndUpdate(
 req.params.id,
 req.body,
 {new:true}
@@ -332,25 +351,91 @@ res.status(500).json({success:false});
 }
 });
 
+/* ================= SETTINGS ================= */
+
+/* GET SETTINGS */
+app.get("/settings", async(req,res)=>{
+try{
+
+let data=await Setting.findOne();
+
+if(!data){
+data=await Setting.create({});
+}
+
+res.json({success:true,data});
+
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
+/* SAVE SETTINGS */
+app.post("/settings", async(req,res)=>{
+try{
+
+let data=await Setting.findOne();
+
+if(data){
+data=await Setting.findByIdAndUpdate(
+data._id,
+{...req.body,updatedAt:new Date()},
+{new:true}
+);
+}else{
+data=await Setting.create(req.body);
+}
+
+res.json({success:true,data});
+
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
+/* CHANGE PASSWORD */
+app.post("/settings/password", async(req,res)=>{
+try{
+
+let data=await Setting.findOne();
+
+if(!data){
+data=await Setting.create({});
+}
+
+data.adminPassword=req.body.password;
+await data.save();
+
+res.json({success:true});
+
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
 /* ================= TRACK ================= */
 
 app.post("/track", async(req,res)=>{
-
 try{
 
-const {staffId,lat,lng} = req.body;
+const {staffId,lat,lng}=req.body;
 
-const staff = await Staff.findById(staffId);
+const staff=await Staff.findById(staffId);
+if(!staff) return res.json({success:false});
 
-if(!staff){
-return res.json({success:false});
+const setting=await Setting.findOne();
+
+if(setting && setting.tracking===false){
+return res.json({success:true});
 }
 
 if(!staff.trackingEnabled || !staff.workLocation){
 return res.json({success:true});
 }
 
-const dist = getDistance(
+const maxRadius=setting?.radius || 200;
+
+const dist=getDistance(
 staff.workLocation.lat,
 staff.workLocation.lng,
 lat,
@@ -360,13 +445,64 @@ lng
 res.json({
 success:true,
 distance:dist,
-alert:dist>200
+alert:dist>maxRadius
 });
 
 }catch(err){
 res.status(500).json({success:false});
 }
+});
 
+/* ================= RESET SYSTEM ================= */
+
+app.delete("/reset/attendance", async(req,res)=>{
+try{
+await Attendance.deleteMany({});
+res.json({success:true});
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
+app.delete("/reset/payment", async(req,res)=>{
+try{
+await Payment.deleteMany({});
+res.json({success:true});
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
+app.delete("/reset/leave", async(req,res)=>{
+try{
+await Leave.deleteMany({});
+res.json({success:true});
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
+app.delete("/reset/testing", async(req,res)=>{
+try{
+await Attendance.deleteMany({});
+await Payment.deleteMany({});
+await Leave.deleteMany({});
+res.json({success:true});
+}catch(err){
+res.status(500).json({success:false});
+}
+});
+
+app.delete("/reset/all", async(req,res)=>{
+try{
+await Attendance.deleteMany({});
+await Payment.deleteMany({});
+await Leave.deleteMany({});
+await Staff.deleteMany({});
+res.json({success:true});
+}catch(err){
+res.status(500).json({success:false});
+}
 });
 
 /* ================= HOME ================= */
@@ -377,7 +513,7 @@ res.send("Levi Interiors API Running 🚀");
 
 /* ================= START ================= */
 
-const PORT = process.env.PORT || 3000;
+const PORT=process.env.PORT || 3000;
 
 app.listen(PORT,()=>{
 console.log("🚀 Server running on",PORT);
