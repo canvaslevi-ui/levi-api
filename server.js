@@ -3,64 +3,72 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ===== SERVER + SOCKET =====
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: { origin: "*" }
+});
 
 // ===== CONFIG =====
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
 
-// ===== DB =====
-mongoose.connect("YOUR_MONGO_URI")
+// ===== DB CONNECT =====
+mongoose.connect(MONGO_URI)
 .then(()=>console.log("✅ MongoDB Connected"))
 .catch(err=>console.log("❌ Mongo Error:", err));
 
 // ===== MODEL =====
 const Project = mongoose.model("Project", new mongoose.Schema({
-  name: { type: String, required: true },
-  panels: { type: Array, default: [] },
+  name: String,
+  panels: Array,
   createdAt: { type: Date, default: Date.now }
 }));
 
 // ===== SOCKET =====
-io.on("connection", socket=>{
-  console.log("⚡ Client connected");
+io.on("connection", (socket) => {
+  console.log("⚡ Client Connected");
 });
 
 // ===== ROUTES =====
 
-// CREATE PROJECT (NO AUTH)
+// 🔹 CREATE PROJECT
 app.post("/api/projects", async (req, res) => {
   try {
     if (!req.body || !req.body.name) {
-      return res.status(400).json({ success: false, message: "Invalid data" });
+      return res.status(400).json({ success: false, message: "Invalid Data" });
     }
 
-    const data = await Project.create(req.body);
+    const project = await Project.create(req.body);
+
     io.emit("refresh");
-    res.json({ success: true, data });
+
+    res.json({ success: true, data: project });
+
   } catch (err) {
-    console.log("❌ Create error:", err);
+    console.log("❌ Create Error:", err);
     res.status(500).json({ success: false });
   }
 });
 
-// GET PROJECTS
+// 🔹 GET ALL PROJECTS
 app.get("/api/projects", async (req, res) => {
   try {
     const data = await Project.find().sort({ _id: -1 });
     res.json({ success: true, data });
   } catch (err) {
-    console.log("❌ Fetch error:", err);
+    console.log("❌ Fetch Error:", err);
     res.status(500).json({ success: false });
   }
 });
 
-// UPDATE STATUS
+// 🔹 UPDATE PANEL STATUS
 app.put("/api/projects/:id/status", async (req, res) => {
   try {
     const { panelId, status } = req.body;
@@ -69,32 +77,39 @@ app.put("/api/projects/:id/status", async (req, res) => {
     if (!project) return res.status(404).json({ success: false });
 
     project.panels.forEach(p => {
-      if (p.id === panelId) p.status = status;
+      if (p.id === panelId) {
+        p.status = status;
+      }
     });
 
     await project.save();
+
     io.emit("refresh");
 
     res.json({ success: true });
+
   } catch (err) {
-    console.log("❌ Update error:", err);
+    console.log("❌ Update Error:", err);
     res.status(500).json({ success: false });
   }
 });
 
-// DELETE PROJECT (NO AUTH)
+// 🔹 DELETE PROJECT
 app.delete("/api/projects/:id", async (req, res) => {
   try {
     await Project.findByIdAndDelete(req.params.id);
+
     io.emit("refresh");
+
     res.json({ success: true });
+
   } catch (err) {
-    console.log("❌ Delete error:", err);
+    console.log("❌ Delete Error:", err);
     res.status(500).json({ success: false });
   }
 });
 
-// ===== START =====
+// ===== START SERVER =====
 server.listen(PORT, () => {
-  console.log("🚀 Server running on", PORT);
+  console.log("🚀 Server running on port", PORT);
 });
