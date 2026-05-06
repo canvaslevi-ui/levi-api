@@ -511,6 +511,50 @@ app.get("/",(req,res)=>{
 res.send("Levi Interiors API Running 🚀");
 });
 
+// ================= PROJECT MODEL =================
+const Project = mongoose.model("Project", new mongoose.Schema({
+  name:String,
+  panels:Array,
+  createdAt:{type:Date,default:Date.now}
+}));
+
+// ================= CREATE PROJECT =================
+app.post("/projects", async(req,res)=>{
+  try{
+    const data = await Project.create(req.body);
+    res.json({success:true,data});
+  }catch(err){
+    res.status(500).json({success:false});
+  }
+});
+
+// ================= GET PROJECTS =================
+app.get("/projects", async(req,res)=>{
+  const data = await Project.find().sort({_id:-1});
+  res.json({success:true,data});
+});
+
+// ================= UPDATE STATUS =================
+app.put("/projects/:id/status", async(req,res)=>{
+  try{
+    const {panelId,status} = req.body;
+
+    const project = await Project.findById(req.params.id);
+
+    project.panels.forEach(p=>{
+      if(p.id === panelId){
+        p.status = status;
+      }
+    });
+
+    await project.save();
+
+    res.json({success:true});
+  }catch(err){
+    res.status(500).json({success:false});
+  }
+});
+
 /* ================= START ================= */
 
 const PORT=process.env.PORT || 3000;
