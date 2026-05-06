@@ -21,8 +21,8 @@ const MONGO_URI = process.env.MONGO_URI;
 
 // ===== DB CONNECT =====
 mongoose.connect(MONGO_URI)
-.then(()=>console.log("✅ MongoDB Connected"))
-.catch(err=>console.log("❌ Mongo Error:", err));
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.log("❌ Mongo Error:", err));
 
 // ===== MODEL =====
 const Project = mongoose.model("Project", new mongoose.Schema({
@@ -32,9 +32,14 @@ const Project = mongoose.model("Project", new mongoose.Schema({
 }));
 
 // ===== SOCKET =====
-io.on("connection", (socket) => {
+io.on("connection", () => {
   console.log("⚡ Client Connected");
 });
+
+// ===== HELPER (ID NORMALIZER) =====
+function normalize(id) {
+  return String(id).replace("#", "").trim();
+}
 
 // ===== ROUTES =====
 
@@ -57,7 +62,7 @@ app.post("/api/projects", async (req, res) => {
   }
 });
 
-// 🔹 GET ALL PROJECTS
+// 🔹 GET PROJECTS
 app.get("/api/projects", async (req, res) => {
   try {
     const data = await Project.find().sort({ _id: -1 });
@@ -68,7 +73,7 @@ app.get("/api/projects", async (req, res) => {
   }
 });
 
-// 🔹 UPDATE PANEL STATUS
+// 🔥 UPDATE PANEL STATUS (FIXED + SAFE)
 app.put("/api/projects/:id/status", async (req, res) => {
   try {
     const { panelId, status } = req.body;
@@ -76,11 +81,18 @@ app.put("/api/projects/:id/status", async (req, res) => {
     const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false });
 
+    let updated = false;
+
     project.panels.forEach(p => {
-      if (p.id === panelId) {
+      if (normalize(p.id) === normalize(panelId)) {
         p.status = status;
+        updated = true;
       }
     });
+
+    if (!updated) {
+      return res.json({ success: false, message: "Panel not found" });
+    }
 
     await project.save();
 
