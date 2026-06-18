@@ -32,7 +32,6 @@ mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => {
     console.error('❌ MongoDB Connection Error:', err.message);
-    console.log('⚠️ Server will continue without database - uploads will fail');
   });
 
 // ===== SCHEMA =====
@@ -118,7 +117,36 @@ function getPanelPrice(length, width) {
 }
 
 // ==========================================
-// 🔥 SPLIT PDF - EXTRACT PANEL NUMBERS FROM TEXT
+// 🔥 EXTRACT # NUMBERS FROM PDF TEXT
+// ==========================================
+function extractHashNumbers(text) {
+  const numbers = [];
+  
+  // Pattern 1: MBR #12, CBR #44, etc.
+  const pattern1 = /(?:MBR|CBR)\s*#(\d+)/gi;
+  let match;
+  while ((match = pattern1.exec(text)) !== null) {
+    numbers.push(parseInt(match[1]));
+  }
+  
+  // Pattern 2: Panel #15, Part #15, etc.
+  const pattern2 = /(?:Panel|Part)\s*#?(\d+)/gi;
+  while ((match = pattern2.exec(text)) !== null) {
+    numbers.push(parseInt(match[1]));
+  }
+  
+  // Pattern 3: Just #15, #3, etc.
+  const pattern3 = /#(\d+)/g;
+  while ((match = pattern3.exec(text)) !== null) {
+    numbers.push(parseInt(match[1]));
+  }
+  
+  // Remove duplicates and sort
+  return [...new Set(numbers)].sort((a, b) => a - b);
+}
+
+// ==========================================
+// 🔥 SPLIT PDF - EXTRACT ALL # NUMBERS & MAP
 // ==========================================
 async function splitPDFIntoStickers(pdfPath, panels) {
   try {
@@ -140,88 +168,102 @@ async function splitPDFIntoStickers(pdfPath, panels) {
 
     console.log('📄 Total PDF Pages:', totalPages);
 
-    // Extract panel number from each page
-    const pagePanelMap = [];
-    const panelPageMap = {};
+    // ==========================================
+    // 🔥 Step 1: Extract # numbers from each page
+    // ==========================================
+    const pageData = [];
+    const allHashNumbers = [];
 
-    // For each page, try to find the panel number
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      // Get text for this page - we'll search through all text
+      // Get page text (approximate - we use full text search)
       const pageText = lines.join(' ');
       
-      // Try patterns in order of reliability
+      // Extract # numbers from this page
+      const hashNums = extractHashNumbers(pageText);
+      
+      // Find the main panel number on this page
       let panelNumber = null;
       
-      // Pattern 1: "Panel X of Y"
-      const panelMatch = pageText.match(/Panel\s*(\d+)\s*of/i);
-      if (panelMatch) {
-        panelNumber = parseInt(panelMatch[1]);
-        console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (Panel X of Y)`);
+      // Look for "Part X of 44" or "Panel X of Y"
+      const partMatch = pageText.match(/(?:Part|Panel)\s*(\d+)\s*of/i);
+      if (partMatch) {
+        panelNumber = parseInt(partMatch[1]);
       }
       
-      // Pattern 2: "Part X of Y"
-      if (!panelNumber) {
-        const partMatch = pageText.match(/Part\s*(\d+)\s*of/i);
-        if (partMatch) {
-          panelNumber = parseInt(partMatch[1]);
-          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (Part X of Y)`);
-        }
+      // If no Part/Panel found, use the first # number
+      if (!panelNumber && hashNums.length > 0) {
+        panelNumber = hashNums[0];
       }
       
-      // Pattern 3: "GF MBR #X" or "FF CBR #X"
-      if (!panelNumber) {
-        const mbrMatch = pageText.match(/(?:GF|FF)\s+MBR\s+#(\d+)/i);
-        const cbrMatch = pageText.match(/(?:GF|FF)\s+CBR\s+#(\d+)/i);
-        
-        if (mbrMatch) {
-          panelNumber = parseInt(mbrMatch[1]);
-          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (MBR #X)`);
-        } else if (cbrMatch) {
-          panelNumber = parseInt(cbrMatch[1]);
-          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (CBR #X)`);
-        }
-      }
+      console.log(`📄 Page ${pageNum}: #${hashNums.join(', #')} → Panel #${panelNumber || 'N/A'}`);
       
-      // Pattern 4: Just "#X" at the end of text
-      if (!panelNumber) {
-        const hashMatch = pageText.match(/#(\d+)/g);
-        if (hashMatch) {
-          // Take the last number found
-          const lastNum = hashMatch[hashMatch.length - 1];
-          panelNumber = parseInt(lastNum.replace('#', ''));
-          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (#X pattern)`);
-        }
-      }
-      
-      pagePanelMap.push({ page: pageNum, panelNumber: panelNumber });
+      pageData.push({
+        page: pageNum,
+        hashNumbers: hashNums,
+        panelNumber: panelNumber,
+        text: pageText
+      });
       
       if (panelNumber) {
-        panelPageMap[panelNumber] = pageNum;
+        allHashNumbers.push(panelNumber);
+      }
+    }
+
+    // Get unique sorted panel numbers
+    const uniquePanels = [...new Set(allHashNumbers)].sort((a, b) => a - b);
+    console.log('📊 All # Numbers in PDF (sorted):', uniquePanels);
+
+    // ==========================================
+    // 🔥 Step 2: Create mapping - Panel # → Page
+    // ==========================================
+    const panelPageMap = {};
+
+    for (const data of pageData) {
+      if (data.panelNumber) {
+        panelPageMap[data.panelNumber] = data.page;
       }
     }
 
     console.log('📊 Panel → Page Mapping:', panelPageMap);
 
-    // Create stickers for each panel
-    for (const panel of panels) {
+    // ==========================================
+    // 🔥 Step 3: Check which panels are in Excel
+    // ==========================================
+    const excelPanelNumbers = panels.map(p => {
+      return parseInt(String(p.id).replace(/[^0-9]/g, '')) || 0;
+    }).filter(n => n > 0);
+
+    console.log('📊 Excel Panels:', excelPanelNumbers.sort((a, b) => a - b));
+
+    // ==========================================
+    // 🔥 Step 4: Create stickers for each panel in sequence
+    // ==========================================
+    // Sort panels by number (ascending)
+    const sortedPanels = [...panels].sort((a, b) => {
+      const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
+      const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
+      return numA - numB;
+    });
+
+    for (const panel of sortedPanels) {
       const panelId = String(panel.id).trim();
       const panelNum = parseInt(panelId.replace(/[^0-9]/g, '')) || 0;
       
       let pageIndex = null;
       
-      // First: Use mapping from PDF text
+      // First: Use mapping from PDF
       if (panelPageMap[panelNum]) {
         pageIndex = panelPageMap[panelNum] - 1;
-        console.log(`✅ Panel ${panelNum} → PDF Page ${pageIndex + 1} (text mapping)`);
+        console.log(`✅ Panel ${panelNum} → PDF Page ${pageIndex + 1} (from # mapping)`);
       }
       
-      // Second: Try to find panel number in text
+      // Second: Search in text
       if (pageIndex === null) {
-        for (let i = 0; i < totalPages; i++) {
-          const pageText = lines.join(' ');
-          if (pageText.includes(`Panel ${panelNum}`) || 
-              pageText.includes(`Part ${panelNum}`) ||
-              pageText.includes(`#${panelNum}`)) {
+        for (let i = 0; i < pageData.length; i++) {
+          const text = pageData[i].text;
+          if (text.includes(`Panel ${panelNum}`) || 
+              text.includes(`Part ${panelNum}`) ||
+              text.includes(`#${panelNum}`)) {
             pageIndex = i;
             console.log(`✅ Panel ${panelNum} → PDF Page ${i + 1} (found in text)`);
             break;
@@ -229,7 +271,7 @@ async function splitPDFIntoStickers(pdfPath, panels) {
         }
       }
       
-      // Third: Use direct mapping (panel 15 → page 15)
+      // Third: Direct mapping (panel 15 → page 15)
       if (pageIndex === null) {
         pageIndex = panelNum - 1;
         if (pageIndex >= totalPages) {
