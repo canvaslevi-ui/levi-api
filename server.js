@@ -117,7 +117,10 @@ function getPanelPrice(length, width) {
   return prices[key] || 1000;
 }
 
-async function splitPDFIntoStickers(pdfPath, panelCount) {
+// ==========================================
+// 🔥 SPLIT PDF - EXTRACT PANEL NUMBERS FROM TEXT
+// ==========================================
+async function splitPDFIntoStickers(pdfPath, panels) {
   try {
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -130,53 +133,156 @@ async function splitPDFIntoStickers(pdfPath, panelCount) {
       fs.mkdirSync(stickersDir, { recursive: true });
     }
 
-    // Each page becomes an individual sticker PDF
-    for (let i = 0; i < Math.min(totalPages, panelCount); i++) {
-      const newPdf = await PDFDocument.create();
-      const [page] = await newPdf.copyPages(pdfDoc, [i]);
-      newPdf.addPage(page);
-      
-      const bytes = await newPdf.save();
-      const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
-      const filePath = path.join(stickersDir, fileName);
-      fs.writeFileSync(filePath, bytes);
-      stickerFiles.push(fileName);
-    }
+    // Read PDF text
+    const pdfData = await PDFParse(pdfBytes);
+    const text = pdfData.text;
+    const lines = text.split('\n').filter(line => line.trim());
 
-    // If more panels than pages, duplicate last page
-    if (panelCount > totalPages) {
-      for (let i = totalPages; i < panelCount; i++) {
-        const lastPage = totalPages - 1;
-        const newPdf = await PDFDocument.create();
-        const [page] = await newPdf.copyPages(pdfDoc, [lastPage]);
-        newPdf.addPage(page);
+    console.log('📄 Total PDF Pages:', totalPages);
+
+    // Extract panel number from each page
+    const pagePanelMap = [];
+    const panelPageMap = {};
+
+    // For each page, try to find the panel number
+    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      // Get text for this page - we'll search through all text
+      const pageText = lines.join(' ');
+      
+      // Try patterns in order of reliability
+      let panelNumber = null;
+      
+      // Pattern 1: "Panel X of Y"
+      const panelMatch = pageText.match(/Panel\s*(\d+)\s*of/i);
+      if (panelMatch) {
+        panelNumber = parseInt(panelMatch[1]);
+        console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (Panel X of Y)`);
+      }
+      
+      // Pattern 2: "Part X of Y"
+      if (!panelNumber) {
+        const partMatch = pageText.match(/Part\s*(\d+)\s*of/i);
+        if (partMatch) {
+          panelNumber = parseInt(partMatch[1]);
+          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (Part X of Y)`);
+        }
+      }
+      
+      // Pattern 3: "GF MBR #X" or "FF CBR #X"
+      if (!panelNumber) {
+        const mbrMatch = pageText.match(/(?:GF|FF)\s+MBR\s+#(\d+)/i);
+        const cbrMatch = pageText.match(/(?:GF|FF)\s+CBR\s+#(\d+)/i);
         
-        const bytes = await newPdf.save();
-        const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
-        const filePath = path.join(stickersDir, fileName);
-        fs.writeFileSync(filePath, bytes);
-        stickerFiles.push(fileName);
+        if (mbrMatch) {
+          panelNumber = parseInt(mbrMatch[1]);
+          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (MBR #X)`);
+        } else if (cbrMatch) {
+          panelNumber = parseInt(cbrMatch[1]);
+          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (CBR #X)`);
+        }
+      }
+      
+      // Pattern 4: Just "#X" at the end of text
+      if (!panelNumber) {
+        const hashMatch = pageText.match(/#(\d+)/g);
+        if (hashMatch) {
+          // Take the last number found
+          const lastNum = hashMatch[hashMatch.length - 1];
+          panelNumber = parseInt(lastNum.replace('#', ''));
+          console.log(`📄 Page ${pageNum} → Panel ${panelNumber} (#X pattern)`);
+        }
+      }
+      
+      pagePanelMap.push({ page: pageNum, panelNumber: panelNumber });
+      
+      if (panelNumber) {
+        panelPageMap[panelNumber] = pageNum;
       }
     }
 
+    console.log('📊 Panel → Page Mapping:', panelPageMap);
+
+    // Create stickers for each panel
+    for (const panel of panels) {
+      const panelId = String(panel.id).trim();
+      const panelNum = parseInt(panelId.replace(/[^0-9]/g, '')) || 0;
+      
+      let pageIndex = null;
+      
+      // First: Use mapping from PDF text
+      if (panelPageMap[panelNum]) {
+        pageIndex = panelPageMap[panelNum] - 1;
+        console.log(`✅ Panel ${panelNum} → PDF Page ${pageIndex + 1} (text mapping)`);
+      }
+      
+      // Second: Try to find panel number in text
+      if (pageIndex === null) {
+        for (let i = 0; i < totalPages; i++) {
+          const pageText = lines.join(' ');
+          if (pageText.includes(`Panel ${panelNum}`) || 
+              pageText.includes(`Part ${panelNum}`) ||
+              pageText.includes(`#${panelNum}`)) {
+            pageIndex = i;
+            console.log(`✅ Panel ${panelNum} → PDF Page ${i + 1} (found in text)`);
+            break;
+          }
+        }
+      }
+      
+      // Third: Use direct mapping (panel 15 → page 15)
+      if (pageIndex === null) {
+        pageIndex = panelNum - 1;
+        if (pageIndex >= totalPages) {
+          pageIndex = pageIndex % totalPages;
+        }
+        console.log(`⚠️ Panel ${panelNum} → PDF Page ${pageIndex + 1} (fallback)`);
+      }
+      
+      if (pageIndex < 0 || pageIndex >= totalPages) {
+        pageIndex = 0;
+        console.log(`⚠️ Panel ${panelNum} → Using Page 1`);
+      }
+
+      // Create individual PDF
+      const newPdf = await PDFDocument.create();
+      const [page] = await newPdf.copyPages(pdfDoc, [pageIndex]);
+      newPdf.addPage(page);
+      
+      const bytes = await newPdf.save();
+      const fileName = `sticker_${panelNum}_${Date.now()}.pdf`;
+      const filePath = path.join(stickersDir, fileName);
+      fs.writeFileSync(filePath, bytes);
+      
+      stickerFiles.push({
+        panelId: panel.id,
+        fileName: fileName,
+        pageNumber: pageIndex + 1
+      });
+    }
+
     return stickerFiles;
+
   } catch (error) {
     console.error("PDF Split Error:", error);
-    // If splitting fails, create dummy stickers
+    // Fallback
     const stickersDir = path.join('./uploads', 'stickers');
     if (!fs.existsSync(stickersDir)) {
       fs.mkdirSync(stickersDir, { recursive: true });
     }
     
     const stickerFiles = [];
-    for (let i = 0; i < panelCount; i++) {
+    for (let i = 0; i < panels.length; i++) {
       const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
       const filePath = path.join(stickersDir, fileName);
       const newPdf = await PDFDocument.create();
       newPdf.addPage([200, 200]);
       const bytes = await newPdf.save();
       fs.writeFileSync(filePath, bytes);
-      stickerFiles.push(fileName);
+      stickerFiles.push({
+        panelId: panels[i].id,
+        fileName: fileName,
+        pageNumber: i + 1
+      });
     }
     return stickerFiles;
   }
@@ -215,9 +321,6 @@ const upload = multer({
 // ROUTES
 // ==========================================
 
-// ==========================================
-// UPLOAD PROJECT WITH STICKER SPLITTING
-// ==========================================
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
   { name: 'pdf', maxCount: 1 }
@@ -309,27 +412,40 @@ app.post("/api/upload", upload.fields([
       });
     }
 
-    // ===== PROCESS PDF AND SPLIT INTO INDIVIDUAL STICKERS =====
+    // ===== PROCESS PDF =====
     let stickerFiles = [];
     let stickerCount = 0;
 
     if (pdfFile) {
       try {
-        stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels.length);
+        stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels);
         stickerCount = stickerFiles.length;
         
-        panels.forEach((panel, index) => {
-          if (index < stickerFiles.length) {
-            panel.stickerFileName = stickerFiles[index];
-            panel.stickerPage = index + 1;
-          } else {
-            const lastIndex = stickerFiles.length - 1;
-            panel.stickerFileName = stickerFiles[lastIndex] || null;
-            panel.stickerPage = lastIndex + 1;
+        stickerFiles.forEach(sticker => {
+          const panel = panels.find(p => String(p.id).trim() === sticker.panelId);
+          if (panel) {
+            panel.stickerFileName = sticker.fileName;
+            panel.stickerPage = sticker.pageNumber;
           }
         });
       } catch (pdfErr) {
         console.error("PDF Processing Error:", pdfErr);
+        const stickersDir = path.join('./uploads', 'stickers');
+        if (!fs.existsSync(stickersDir)) {
+          fs.mkdirSync(stickersDir, { recursive: true });
+        }
+        
+        for (let i = 0; i < panels.length; i++) {
+          const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+          const filePath = path.join(stickersDir, fileName);
+          const newPdf = await PDFDocument.create();
+          newPdf.addPage([200, 200]);
+          const bytes = await newPdf.save();
+          fs.writeFileSync(filePath, bytes);
+          panels[i].stickerFileName = fileName;
+          panels[i].stickerPage = i + 1;
+        }
+        stickerCount = panels.length;
       }
     }
 
@@ -344,7 +460,6 @@ app.post("/api/upload", upload.fields([
 
     await project.save();
 
-    // Cleanup uploaded files
     try {
       if (excelFile && fs.existsSync(excelFile.path)) {
         fs.unlinkSync(excelFile.path);
@@ -366,7 +481,6 @@ app.post("/api/upload", upload.fields([
 
   } catch (error) {
     console.error('Upload error:', error);
-    // Clean up files on error
     try {
       if (req.files) {
         Object.keys(req.files).forEach(key => {
@@ -386,9 +500,7 @@ app.post("/api/upload", upload.fields([
   }
 });
 
-// ==========================================
-// GET ALL PROJECTS
-// ==========================================
+// ===== GET PROJECTS =====
 app.get("/api/projects", async (req, res) => {
   try {
     const data = await Project.find().sort({ _id: -1 });
@@ -399,9 +511,6 @@ app.get("/api/projects", async (req, res) => {
   }
 });
 
-// ==========================================
-// GET SINGLE PROJECT
-// ==========================================
 app.get("/api/projects/:id", async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -415,9 +524,7 @@ app.get("/api/projects/:id", async (req, res) => {
   }
 });
 
-// ==========================================
-// UPDATE PANEL STATUS
-// ==========================================
+// ===== UPDATE STATUS =====
 app.put("/api/projects/:id/status", async (req, res) => {
   try {
     const { panelId, status } = req.body;
@@ -455,9 +562,7 @@ app.put("/api/projects/:id/status", async (req, res) => {
   }
 });
 
-// ==========================================
-// DELETE PROJECT
-// ==========================================
+// ===== DELETE PROJECT =====
 app.delete("/api/projects/:id", async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -465,7 +570,6 @@ app.delete("/api/projects/:id", async (req, res) => {
       return res.status(404).json({ success: false });
     }
 
-    // Delete sticker files
     const stickersDir = path.join('./uploads', 'stickers');
     project.panels.forEach(panel => {
       if (panel.stickerFileName) {
@@ -487,9 +591,7 @@ app.delete("/api/projects/:id", async (req, res) => {
   }
 });
 
-// ==========================================
-// GET INDIVIDUAL STICKER - ORIGINAL PDF
-// ==========================================
+// ===== GET INDIVIDUAL STICKER =====
 app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
   try {
     const { id, panelId } = req.params;
@@ -515,7 +617,6 @@ app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
 
     console.log(`📄 Serving sticker: ${panel.stickerFileName} for panel ${panelId}`);
 
-    // Send the original PDF file
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${panel.stickerFileName}"`);
     res.setHeader('Cache-Control', 'no-cache');
@@ -527,9 +628,7 @@ app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
   }
 });
 
-// ==========================================
-// PRINT ALL STICKERS - HTML VIEW
-// ==========================================
+// ===== PRINT ALL STICKERS =====
 app.get("/api/projects/:id/print-stickers", async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -615,9 +714,7 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
   }
 });
 
-// ==========================================
-// START SERVER
-// ==========================================
+// ===== START SERVER =====
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 API URL: http://localhost:${PORT}`);
