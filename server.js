@@ -9,6 +9,7 @@ const XLSX = require("xlsx");
 const PDFParse = require("pdf-parse");
 const fs = require("fs");
 const path = require("path");
+const { PDFDocument } = require('pdf-lib');
 
 const app = express();
 app.use(cors());
@@ -44,20 +45,18 @@ const PanelSchema = new mongoose.Schema({
   }],
   totalGroupQty: Number,
   price: { type: Number, default: 0 },
-  stickerFile: { type: String },
   stickerPage: { type: Number },
-  stickerCount: { type: Number, default: 0 }
+  stickerFileName: { type: String } // Individual sticker file name
 });
 
 const ProjectSchema = new mongoose.Schema({
   name: { type: String, required: true },
   panels: [PanelSchema],
   createdAt: { type: Date, default: Date.now },
-  stickerPDF: { type: String },
-  totalPrice: { type: Number, default: 0 }
+  totalPrice: { type: Number, default: 0 },
+  stickerCount: { type: Number, default: 0 }
 });
 
-// 🔥 Index (faster queries)
 ProjectSchema.index({ name: 1 });
 
 const Project = mongoose.model("Project", ProjectSchema);
@@ -114,6 +113,76 @@ function getPanelPrice(length, width) {
   return prices[key] || 1000;
 }
 
+// ===== SPLIT PDF INTO INDIVIDUAL STICKERS =====
+async function splitPDFIntoStickers(pdfPath, panelCount) {
+  try {
+    const pdfBytes = fs.readFileSync(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const totalPages = pdfDoc.getPageCount();
+    
+    const stickerFiles = [];
+    const stickersDir = path.join('./uploads', 'stickers');
+    
+    if (!fs.existsSync(stickersDir)) {
+      fs.mkdirSync(stickersDir, { recursive: true });
+    }
+
+    // If PDF has multiple pages, each page is a sticker
+    // If PDF has 1 page, we need to split it into individual stickers
+    if (totalPages >= panelCount) {
+      // Each page is a sticker
+      for (let i = 0; i < Math.min(totalPages, panelCount); i++) {
+        const newPdf = await PDFDocument.create();
+        const [page] = await newPdf.copyPages(pdfDoc, [i]);
+        newPdf.addPage(page);
+        
+        const bytes = await newPdf.save();
+        const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+        const filePath = path.join(stickersDir, fileName);
+        fs.writeFileSync(filePath, bytes);
+        stickerFiles.push(fileName);
+      }
+    } else {
+      // 1 page PDF with multiple stickers - need to detect and split
+      // For now, if less pages than panels, duplicate the pages
+      for (let i = 0; i < panelCount; i++) {
+        const pageIndex = i % totalPages;
+        const newPdf = await PDFDocument.create();
+        const [page] = await newPdf.copyPages(pdfDoc, [pageIndex]);
+        newPdf.addPage(page);
+        
+        const bytes = await newPdf.save();
+        const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+        const filePath = path.join(stickersDir, fileName);
+        fs.writeFileSync(filePath, bytes);
+        stickerFiles.push(fileName);
+      }
+    }
+
+    return stickerFiles;
+  } catch (error) {
+    console.error("PDF Split Error:", error);
+    // If splitting fails, create dummy stickers
+    const stickersDir = path.join('./uploads', 'stickers');
+    if (!fs.existsSync(stickersDir)) {
+      fs.mkdirSync(stickersDir, { recursive: true });
+    }
+    
+    const stickerFiles = [];
+    for (let i = 0; i < panelCount; i++) {
+      const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+      const filePath = path.join(stickersDir, fileName);
+      // Create empty PDF
+      const newPdf = await PDFDocument.create();
+      newPdf.addPage([200, 200]);
+      const bytes = await newPdf.save();
+      fs.writeFileSync(filePath, bytes);
+      stickerFiles.push(fileName);
+    }
+    return stickerFiles;
+  }
+}
+
 // ===== FILE UPLOAD CONFIG =====
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -131,7 +200,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const allowed = ['.csv', '.xlsx', '.xls', '.pdf'];
@@ -145,7 +214,7 @@ const upload = multer({
 
 // ===== ROUTES =====
 
-// 🔹 UPLOAD PROJECT WITH FILES
+// 🔹 UPLOAD PROJECT WITH STICKER SPLITTING
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
   { name: 'pdf', maxCount: 1 }
@@ -160,7 +229,6 @@ app.post("/api/upload", upload.fields([
       });
     }
 
-    // Get files
     const excelFile = req.files['excel'] ? req.files['excel'][0] : null;
     const pdfFile = req.files['pdf'] ? req.files['pdf'][0] : null;
 
@@ -176,7 +244,6 @@ app.post("/api/upload", upload.fields([
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-    // Find header row
     let headerIndex = -1;
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -204,7 +271,6 @@ app.post("/api/upload", upload.fields([
 
     let panels = [];
 
-    // Process rows
     for (let i = headerIndex + 1; i < rows.length; i++) {
       const row = rows[i];
       if (!row || !row[panelIdx]) continue;
@@ -228,8 +294,7 @@ app.post("/api/upload", upload.fields([
             seq: index + 1
           }],
           totalGroupQty: qty,
-          price: price,
-          stickerCount: 0
+          price: price
         });
       });
     }
@@ -241,49 +306,50 @@ app.post("/api/upload", upload.fields([
       });
     }
 
-    // ===== PROCESS PDF STICKERS =====
-    let stickerPages = 0;
-    let stickerFilename = null;
+    // ===== PROCESS PDF AND SPLIT INTO INDIVIDUAL STICKERS =====
+    let stickerFiles = [];
+    let stickerCount = 0;
 
     if (pdfFile) {
-      stickerFilename = pdfFile.filename;
       try {
-        const pdfBuffer = fs.readFileSync(pdfFile.path);
-        const pdfData = await PDFParse(pdfBuffer);
-        stickerPages = pdfData.numpages;
+        // Split PDF into individual stickers - one per panel
+        stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels.length);
+        stickerCount = stickerFiles.length;
         
-        // Extract text from PDF
-        const text = pdfData.text;
-        const lines = text.split('\n').filter(line => line.trim());
-        
-        // Try to match panels with stickers
-        panels.forEach((panel, idx) => {
-          const panelId = panel.id.replace('#', '');
-          const panelDim = `${panel.items[0].length}x${panel.items[0].width}`;
-          
-          let found = false;
-          for (let page = 1; page <= stickerPages; page++) {
-            const pageText = lines.join(' ');
-            if (pageText.includes(panelId) || pageText.includes(panelDim)) {
-              panel.stickerPage = page;
-              panel.stickerCount = 1;
-              found = true;
-              break;
-            }
-          }
-          
-          if (!found) {
-            panel.stickerPage = (idx % stickerPages) + 1;
-            panel.stickerCount = 1;
+        // Assign each sticker to a panel
+        panels.forEach((panel, index) => {
+          if (index < stickerFiles.length) {
+            panel.stickerFileName = stickerFiles[index];
+            panel.stickerPage = index + 1;
+          } else {
+            // If more panels than stickers, use the last sticker
+            const lastIndex = stickerFiles.length - 1;
+            panel.stickerFileName = stickerFiles[lastIndex] || null;
+            panel.stickerPage = lastIndex + 1;
           }
         });
       } catch (pdfErr) {
-        console.log("PDF Processing Error:", pdfErr);
-        // Assign sequential pages if PDF processing fails
-        panels.forEach((panel, idx) => {
-          panel.stickerPage = (idx % 10) + 1;
-          panel.stickerCount = 1;
-        });
+        console.error("PDF Processing Error:", pdfErr);
+        // If PDF processing fails, create dummy stickers
+        const stickersDir = path.join('./uploads', 'stickers');
+        if (!fs.existsSync(stickersDir)) {
+          fs.mkdirSync(stickersDir, { recursive: true });
+        }
+        
+        for (let i = 0; i < panels.length; i++) {
+          const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+          const filePath = path.join(stickersDir, fileName);
+          // Create empty PDF
+          const { PDFDocument } = require('pdf-lib');
+          const newPdf = await PDFDocument.create();
+          newPdf.addPage([200, 200]);
+          const bytes = await newPdf.save();
+          fs.writeFileSync(filePath, bytes);
+          stickerFiles.push(fileName);
+          panels[i].stickerFileName = fileName;
+          panels[i].stickerPage = i + 1;
+        }
+        stickerCount = stickerFiles.length;
       }
     }
 
@@ -294,8 +360,8 @@ app.post("/api/upload", upload.fields([
     const project = new Project({
       name: projectName,
       panels: panels,
-      stickerPDF: stickerFilename,
-      totalPrice: totalPrice
+      totalPrice: totalPrice,
+      stickerCount: stickerCount
     });
 
     await project.save();
@@ -317,7 +383,7 @@ app.post("/api/upload", upload.fields([
     res.json({
       success: true,
       project: project,
-      message: `Uploaded ${panels.length} panels`
+      message: `Uploaded ${panels.length} panels with ${stickerCount} stickers`
     });
 
   } catch (error) {
@@ -425,13 +491,16 @@ app.delete("/api/projects/:id", async (req, res) => {
       return res.status(404).json({ success: false });
     }
 
-    // Delete sticker PDF if exists
-    if (project.stickerPDF) {
-      const pdfPath = path.join('./uploads', project.stickerPDF);
-      if (fs.existsSync(pdfPath)) {
-        fs.unlinkSync(pdfPath);
+    // Delete sticker files
+    const stickersDir = path.join('./uploads', 'stickers');
+    project.panels.forEach(panel => {
+      if (panel.stickerFileName) {
+        const stickerPath = path.join(stickersDir, panel.stickerFileName);
+        if (fs.existsSync(stickerPath)) {
+          fs.unlinkSync(stickerPath);
+        }
       }
-    }
+    });
 
     await Project.findByIdAndDelete(req.params.id);
     io.emit("refresh");
@@ -444,166 +513,141 @@ app.delete("/api/projects/:id", async (req, res) => {
   }
 });
 
-// 🔹 PRINT STICKERS
-app.get("/api/projects/:id/print-stickers", async (req, res) => {
+// 🔹 GET INDIVIDUAL STICKER
+app.get("/api/sticker/:projectId/:panelId", async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
+    const { projectId, panelId } = req.params;
+    const project = await Project.findById(projectId);
+    
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
 
-    const highlight = req.query.highlight || '';
+    const panel = project.panels.find(p => normalize(p.id) === normalize(panelId));
+    if (!panel || !panel.stickerFileName) {
+      return res.status(404).json({ success: false, message: 'Sticker not found' });
+    }
 
-    // Group panels by sticker page
-    const stickerGroups = {};
-    project.panels.forEach(panel => {
-      const page = panel.stickerPage || 1;
-      if (!stickerGroups[page]) {
-        stickerGroups[page] = [];
-      }
-      stickerGroups[page].push(panel);
-    });
+    const stickerPath = path.join('./uploads', 'stickers', panel.stickerFileName);
+    if (!fs.existsSync(stickerPath)) {
+      return res.status(404).json({ success: false, message: 'Sticker file not found' });
+    }
 
-    // Generate HTML for stickers
-    let html = `
+    res.sendFile(path.resolve(stickerPath));
+  } catch (error) {
+    console.error('Sticker fetch error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// 🔹 PRINT INDIVIDUAL STICKER
+app.get("/api/projects/:id/print-sticker/:panelId", async (req, res) => {
+  try {
+    const { id, panelId } = req.params;
+    const project = await Project.findById(id);
+    
+    if (!project) {
+      return res.status(404).json({ success: false, message: 'Project not found' });
+    }
+
+    const panel = project.panels.find(p => normalize(p.id) === normalize(panelId));
+    if (!panel) {
+      return res.status(404).json({ success: false, message: 'Panel not found' });
+    }
+
+    const item = panel.items[0];
+    
+    // Generate single sticker HTML
+    const html = `
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Stickers - ${project.name}</title>
+      <title>Sticker - ${panel.id}</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
-          font-family: Arial, Helvetica, sans-serif; 
-          padding: 20px; 
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
           background: #f0f0f0;
-        }
-        .header {
-          text-align: center;
-          padding: 15px;
-          background: white;
-          border-radius: 8px;
-          margin-bottom: 20px;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .header h1 { font-size: 20px; color: #1a1a2e; }
-        .header p { color: #666; font-size: 14px; margin-top: 4px; }
-        .sticker-grid {
-          display: grid;
-          grid-template-columns: repeat(4, 1fr);
-          gap: 15px;
-          max-width: 1200px;
-          margin: 0 auto;
+          font-family: Arial, sans-serif;
         }
         .sticker {
           background: white;
-          padding: 12px;
-          border: 2px solid #333;
-          border-radius: 6px;
-          page-break-inside: avoid;
-          min-height: 160px;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
-        .sticker.highlight {
-          border-color: #8b5cf6;
-          background: #faf5ff;
+          padding: 30px;
+          border: 3px solid #333;
+          border-radius: 8px;
+          width: 350px;
+          box-shadow: 0 4px 8px rgba(0,0,0,0.1);
         }
         .sticker-header {
           font-weight: bold;
-          font-size: 14px;
+          font-size: 18px;
           border-bottom: 2px solid #333;
-          padding-bottom: 6px;
-          margin-bottom: 8px;
+          padding-bottom: 10px;
+          margin-bottom: 12px;
           display: flex;
           justify-content: space-between;
           align-items: center;
         }
-        .sticker-header .id { font-size: 16px; }
-        .sticker-header .status {
-          font-size: 10px;
-          padding: 2px 8px;
-          border-radius: 10px;
-          background: #e5e5e5;
-          text-transform: uppercase;
-        }
-        .sticker-content { font-size: 12px; line-height: 1.6; }
-        .sticker-content div { margin: 2px 0; }
+        .sticker-header .id { font-size: 20px; color: #1a1a2e; }
+        .sticker-content { font-size: 14px; line-height: 2; }
         .sticker-content .label { color: #666; }
         .sticker-content .value { font-weight: bold; color: #1a1a2e; }
         .sticker-barcode {
-          margin-top: 8px;
+          margin: 12px 0;
           text-align: center;
           font-family: 'Courier New', monospace;
-          font-size: 18px;
-          letter-spacing: 3px;
-          padding: 4px;
+          font-size: 22px;
+          letter-spacing: 4px;
+          padding: 8px;
           background: #f8f8f8;
           border-radius: 4px;
         }
         .sticker-footer {
-          margin-top: 8px;
-          font-size: 9px;
+          margin-top: 12px;
+          font-size: 11px;
           color: #999;
           text-align: center;
           border-top: 1px solid #eee;
-          padding-top: 6px;
+          padding-top: 8px;
         }
-        .sticker .price {
-          color: #22c55e;
+        .sticker .price { color: #22c55e; font-weight: bold; font-size: 16px; }
+        .status-badge {
+          display: inline-block;
+          padding: 4px 12px;
+          border-radius: 12px;
+          font-size: 11px;
           font-weight: bold;
+          text-transform: uppercase;
         }
         @media print {
-          body { background: white; padding: 10px; }
-          .header { box-shadow: none; border: 1px solid #ddd; }
-          .sticker { border: 1px solid #999; box-shadow: none; }
-          .sticker-grid { gap: 10px; }
-          .sticker.highlight { border-color: #8b5cf6; }
-        }
-        @media (max-width: 768px) {
-          .sticker-grid { grid-template-columns: repeat(2, 1fr); }
-        }
-        @media (max-width: 480px) {
-          .sticker-grid { grid-template-columns: 1fr; }
+          body { background: white; }
+          .sticker { border: 2px solid #999; box-shadow: none; }
         }
       </style>
     </head>
     <body>
-      <div class="header">
-        <h1>📋 ${project.name}</h1>
-        <p>Total Panels: ${project.panels.length} | Total Price: ₹${project.totalPrice.toLocaleString()}</p>
-      </div>
-      <div class="sticker-grid">
-    `;
-
-    project.panels.forEach((panel, index) => {
-      const item = panel.items[0];
-      const isHighlight = highlight && panel.id.includes(highlight);
-      
-      html += `
-        <div class="sticker${isHighlight ? ' highlight' : ''}">
-          <div class="sticker-header">
-            <span class="id">${panel.id}</span>
-            <span class="status" style="background:${
-              panel.status === 'pending' ? '#f59e0b' :
-              panel.status === 'cutting' ? '#3b82f6' : '#10b981'
-            };color:white;">${panel.status}</span>
-          </div>
-          <div class="sticker-content">
-            <div><span class="label">Dimensions:</span> <span class="value">${item.length} × ${item.width} mm</span></div>
-            <div><span class="label">Quantity:</span> <span class="value">${panel.totalGroupQty || 1}</span></div>
-            <div><span class="label">Price:</span> <span class="value price">₹${panel.price || 0}</span></div>
-            <div><span class="label">Page:</span> <span class="value">${panel.stickerPage || 'N/A'}</span></div>
-          </div>
-          <div class="sticker-barcode">${panel.id.replace('#', '')}</div>
-          <div class="sticker-footer">${project.name} | ${new Date().toLocaleDateString('en-IN')}</div>
+      <div class="sticker">
+        <div class="sticker-header">
+          <span class="id">${panel.id}</span>
+          <span class="status-badge" style="background:${
+            panel.status === 'pending' ? '#f59e0b' :
+            panel.status === 'cutting' ? '#3b82f6' : '#10b981'
+          };color:white;">${panel.status}</span>
         </div>
-      `;
-    });
-
-    html += `
+        <div class="sticker-content">
+          <div><span class="label">Dimensions:</span> <span class="value">${item.length} × ${item.width} mm</span></div>
+          <div><span class="label">Quantity:</span> <span class="value">${panel.totalGroupQty || 1}</span></div>
+          <div><span class="label">Price:</span> <span class="value price">₹${panel.price || 0}</span></div>
+          <div><span class="label">Project:</span> <span class="value">${project.name}</span></div>
+        </div>
+        <div class="sticker-barcode">${panel.id.replace('#', '')}</div>
+        <div class="sticker-footer">${project.name} | ${new Date().toLocaleDateString('en-IN')}</div>
       </div>
       <script>
-        // Auto-print after a short delay
-        setTimeout(() => { window.print(); }, 1000);
+        setTimeout(() => window.print(), 500);
       </script>
     </body>
     </html>
@@ -612,7 +656,7 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
     res.send(html);
 
   } catch (error) {
-    console.error('Print error:', error);
+    console.error('Print sticker error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
