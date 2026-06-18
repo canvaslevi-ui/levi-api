@@ -117,22 +117,17 @@ function getPanelPrice(length, width) {
 }
 
 // ===== IMPROVED PDF SPLITTING =====
-async function splitPDFIntoStickers(pdfPath, panelCount) {
-  try {
-    console.log(`📄 Splitting PDF: ${pdfPath} into ${panelCount} stickers`);
-    
-    const pdfBytes = fs.readFileSync(pdfPath);
-    const pdfDoc = await PDFDocument.load(pdfBytes);
-    const totalPages = pdfDoc.getPageCount();
-    
-    console.log(`📄 PDF has ${totalPages} pages`);
-    
-    const stickerFiles = [];
-    const stickersDir = path.join('./uploads', 'stickers');
-    
-    if (!fs.existsSync(stickersDir)) {
-      fs.mkdirSync(stickersDir, { recursive: true });
-    }
+function printSingleSticker(panelId){
+ const id=document.getElementById("projectSelect").value;
+
+ window.open(
+   API+"/api/projects/"
+   +id+
+   "/print-sticker/"
+   +panelId,
+   "_blank"
+ );
+}
 
     // If PDF has multiple pages, each page is a sticker
     if (totalPages >= panelCount) {
