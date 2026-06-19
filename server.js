@@ -58,10 +58,10 @@ const ProjectSchema = new mongoose.Schema({
   totalPrice: { type: Number, default: 0 },
   stickerCount: { type: Number, default: 0 },
   // ==========================================
-  // 🔥 NEW: Store panel → page mapping
+  // 🔥 FIXED: Use Object instead of Map
   // ==========================================
-  panelPageMap: { type: Map, of: Number, default: {} },
-  stickerPDFPath: { type: String } // Path to original PDF
+  panelPageMap: { type: Object, default: {} },
+  stickerPDFPath: { type: String }
 });
 
 ProjectSchema.index({ name: 1 });
@@ -120,7 +120,7 @@ function getPanelPrice(length, width) {
 }
 
 // ==========================================
-// 🔥 NEW: OCR - Extract panel numbers from PDF
+// 🔥 OCR - Extract panel numbers from PDF
 // ==========================================
 async function extractPanelNumbersFromPDF(pdfPath) {
   try {
@@ -132,6 +132,7 @@ async function extractPanelNumbersFromPDF(pdfPath) {
 
     console.log('📄 Total PDF Pages:', totalPages);
     console.log('🔍 Running OCR to extract panel numbers...');
+    console.log('📝 First 500 chars:', text.substring(0, 500));
 
     const panelPageMap = {};
 
@@ -139,68 +140,57 @@ async function extractPanelNumbersFromPDF(pdfPath) {
     // 🔥 Extract panel number from each page
     // ==========================================
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      const pageText = lines.join(' ');
+      // Since PDFParse gives all text, we need to find which page
+      // Use the page text from the full text
+      const pageText = text;
       
       let panelNumber = null;
       let panelId = null;
       
-      // Pattern 1: #15, #27, #3, etc.
-      const hashMatch = pageText.match(/#(\d+)/);
-      if (hashMatch) {
-        panelNumber = parseInt(hashMatch[1]);
-        panelId = '#' + panelNumber;
-        console.log(`📄 Page ${pageNum}: Found #${panelNumber}`);
-      }
+      // Try multiple patterns
+      const patterns = [
+        /#(\d+)/,                                    // #15
+        /Panel\s*#?(\d+)/i,                          // Panel 15
+        /Part\s*#?(\d+)/i,                           // Part 15
+        /(?:MBR|CBR)\s*#(\d+)/i,                    // MBR #15
+        /(?:GF|FF)\s*(?:MBR|CBR)\s*#(\d+)/i,        // GF MBR #15
+        /#(\d+)\s*(?:MBR|CBR)/i                     // #15 MBR
+      ];
       
-      // Pattern 2: Panel 15, Panel 27, etc.
-      if (!panelNumber) {
-        const panelMatch = pageText.match(/Panel\s+(\d+)/i);
-        if (panelMatch) {
-          panelNumber = parseInt(panelMatch[1]);
+      for (const pattern of patterns) {
+        const match = pageText.match(pattern);
+        if (match) {
+          panelNumber = parseInt(match[1]);
           panelId = '#' + panelNumber;
-          console.log(`📄 Page ${pageNum}: Found Panel ${panelNumber}`);
-        }
-      }
-      
-      // Pattern 3: Part 15, Part 27, etc.
-      if (!panelNumber) {
-        const partMatch = pageText.match(/Part\s+(\d+)/i);
-        if (partMatch) {
-          panelNumber = parseInt(partMatch[1]);
-          panelId = '#' + panelNumber;
-          console.log(`📄 Page ${pageNum}: Found Part ${panelNumber}`);
-        }
-      }
-      
-      // Pattern 4: MBR #15, CBR #27, etc.
-      if (!panelNumber) {
-        const mbrMatch = pageText.match(/(?:MBR|CBR)\s*#(\d+)/i);
-        if (mbrMatch) {
-          panelNumber = parseInt(mbrMatch[1]);
-          panelId = '#' + panelNumber;
-          console.log(`📄 Page ${pageNum}: Found MBR/CBR #${panelNumber}`);
-        }
-      }
-      
-      // Pattern 5: GF MBR #15, FF CBR #27, etc.
-      if (!panelNumber) {
-        const fullMatch = pageText.match(/(?:GF|FF)\s+(?:MBR|CBR)\s*#(\d+)/i);
-        if (fullMatch) {
-          panelNumber = parseInt(fullMatch[1]);
-          panelId = '#' + panelNumber;
-          console.log(`📄 Page ${pageNum}: Found GF/FF MBR/CBR #${panelNumber}`);
+          console.log(`📄 Page ${pageNum}: Found ${panelId} (pattern: ${pattern})`);
+          break;
         }
       }
       
       // If panel found, store mapping
       if (panelId) {
-        // If same panel appears on multiple pages, use first occurrence
         if (!panelPageMap[panelId]) {
           panelPageMap[panelId] = pageNum;
         } else {
-          console.log(`⚠️ Panel ${panelId} already mapped to Page ${panelPageMap[panelId]}, ignoring Page ${pageNum}`);
+          console.log(`⚠️ Panel ${panelId} already mapped to Page ${panelPageMap[panelId]}`);
         }
       }
+    }
+
+    // ==========================================
+    // 🔥 FALLBACK: If no mappings found, use sequential
+    // ==========================================
+    if (Object.keys(panelPageMap).length === 0) {
+      console.log('⚠️ No panel numbers found in PDF. Using sequential mapping...');
+      // Extract all numbers from text
+      const allNumbers = text.match(/\b(\d{1,2})\b/g) || [];
+      const uniqueNumbers = [...new Set(allNumbers.map(Number))].filter(n => n >= 1 && n <= 50).sort((a, b) => a - b);
+      
+      uniqueNumbers.forEach((num, index) => {
+        const panelId = '#' + num;
+        panelPageMap[panelId] = index + 1;
+        console.log(`📄 Panel ${panelId} → Page ${index + 1} (sequential fallback)`);
+      });
     }
 
     console.log('📊 Panel → Page Mapping:', panelPageMap);
@@ -213,7 +203,7 @@ async function extractPanelNumbersFromPDF(pdfPath) {
 }
 
 // ==========================================
-// 🔥 NEW: Get PDF page as response
+// 🔥 Get PDF page as response
 // ==========================================
 async function getPDFPage(pdfPath, pageNumber) {
   try {
@@ -426,7 +416,10 @@ app.post("/api/upload", upload.fields([
     res.json({
       success: true,
       project: project,
-      message: `Uploaded ${panels.length} panels with ${Object.keys(panelPageMap).length} sticker mappings`
+      message: `Uploaded ${panels.length} panels with ${Object.keys(panelPageMap).length} sticker mappings`,
+      debug: {
+        panelPageMap: panelPageMap
+      }
     });
 
   } catch (error) {
@@ -435,6 +428,34 @@ app.post("/api/upload", upload.fields([
       success: false, 
       message: error.message || 'Upload failed' 
     });
+  }
+});
+
+// ==========================================
+// 🔥 UPDATE MAPPING - Manual Fix
+// ==========================================
+app.put("/api/projects/:id/mapping", async (req, res) => {
+  try {
+    const { panelPageMap } = req.body;
+    const project = await Project.findById(req.params.id);
+    
+    if (!project) {
+      return res.status(404).json({ success: false, message: 'Project not found' });
+    }
+
+    project.panelPageMap = panelPageMap;
+    project.stickerCount = Object.keys(panelPageMap).length;
+    await project.save();
+
+    io.emit('refresh');
+
+    res.json({
+      success: true,
+      message: `Updated mapping with ${Object.keys(panelPageMap).length} stickers`
+    });
+  } catch (error) {
+    console.error('Update mapping error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -593,7 +614,7 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
 });
 
 // ==========================================
-// 🔥 PRINT ALL STICKERS - HTML VIEW (Using mapping)
+// 🔥 PRINT ALL STICKERS - HTML VIEW
 // ==========================================
 app.get("/api/projects/:id/print-stickers", async (req, res) => {
   try {
@@ -638,7 +659,6 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
       <div class="sticker-grid">
     `;
 
-    // Sort panels by ID number
     const sortedPanels = [...project.panels].sort((a, b) => {
       const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
       const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
