@@ -6,10 +6,12 @@ const http = require("http");
 const { Server } = require("socket.io");
 const multer = require("multer");
 const XLSX = require("xlsx");
-const PDFParse = require("pdf-parse");
 const fs = require("fs");
 const path = require("path");
 const { PDFDocument } = require('pdf-lib');
+const { createCanvas } = require('canvas');
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+const Tesseract = require('tesseract.js');
 
 const app = express();
 app.use(cors());
@@ -57,9 +59,6 @@ const ProjectSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   totalPrice: { type: Number, default: 0 },
   stickerCount: { type: Number, default: 0 },
-  // ==========================================
-  // 🔥 FIXED: Use Object instead of Map
-  // ==========================================
   panelPageMap: { type: Object, default: {} },
   stickerPDFPath: { type: String }
 });
@@ -119,77 +118,89 @@ function getPanelPrice(length, width) {
   return prices[key] || 1000;
 }
 
+function extractPanelNumberFromText(text) {
+  const patterns = [
+    /#(\d+)/,
+    /Panel\s*#?(\d+)/i,
+    /Part\s*#?(\d+)/i,
+    /(?:MBR|CBR)\s*#(\d+)/i,
+    /(?:GF|FF)\s*(?:MBR|CBR)\s*#(\d+)/i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      return parseInt(match[1]);
+    }
+  }
+  return null;
+}
+
 // ==========================================
-// 🔥 OCR - Extract panel numbers from PDF
+// 🔥 OCR with PDF.js + Tesseract + Canvas
 // ==========================================
 async function extractPanelNumbersFromPDF(pdfPath) {
   try {
-    const pdfBytes = fs.readFileSync(pdfPath);
-    const pdfData = await PDFParse(pdfBytes);
-    const text = pdfData.text;
-    const lines = text.split('\n').filter(line => line.trim());
-    const totalPages = pdfData.numpages;
-
+    console.log('🔍 Running OCR with PDF.js + Tesseract...');
+    
+    const data = new Uint8Array(fs.readFileSync(pdfPath));
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    const totalPages = pdf.numPages;
+    
     console.log('📄 Total PDF Pages:', totalPages);
-    console.log('🔍 Running OCR to extract panel numbers...');
-    console.log('📝 First 500 chars:', text.substring(0, 500));
 
     const panelPageMap = {};
+    let allText = '';
 
-    // ==========================================
-    // 🔥 Extract panel number from each page
-    // ==========================================
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      // Since PDFParse gives all text, we need to find which page
-      // Use the page text from the full text
-      const pageText = text;
+      console.log(`📄 Processing Page ${pageNum}/${totalPages}...`);
       
-      let panelNumber = null;
-      let panelId = null;
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.5 });
       
-      // Try multiple patterns
-      const patterns = [
-        /#(\d+)/,                                    // #15
-        /Panel\s*#?(\d+)/i,                          // Panel 15
-        /Part\s*#?(\d+)/i,                           // Part 15
-        /(?:MBR|CBR)\s*#(\d+)/i,                    // MBR #15
-        /(?:GF|FF)\s*(?:MBR|CBR)\s*#(\d+)/i,        // GF MBR #15
-        /#(\d+)\s*(?:MBR|CBR)/i                     // #15 MBR
-      ];
+      const canvas = createCanvas(viewport.width, viewport.height);
+      const ctx = canvas.getContext('2d');
       
-      for (const pattern of patterns) {
-        const match = pageText.match(pattern);
-        if (match) {
-          panelNumber = parseInt(match[1]);
-          panelId = '#' + panelNumber;
-          console.log(`📄 Page ${pageNum}: Found ${panelId} (pattern: ${pattern})`);
-          break;
-        }
-      }
+      await page.render({ canvasContext: ctx, viewport }).promise;
       
-      // If panel found, store mapping
-      if (panelId) {
+      const imageData = canvas.toDataURL('image/png');
+      
+      const result = await Tesseract.recognize(imageData, 'eng');
+      const text = result.data.text;
+      
+      allText += text + '\n';
+      
+      const panelNumber = extractPanelNumberFromText(text);
+      
+      if (panelNumber) {
+        const panelId = '#' + panelNumber;
         if (!panelPageMap[panelId]) {
           panelPageMap[panelId] = pageNum;
-        } else {
-          console.log(`⚠️ Panel ${panelId} already mapped to Page ${panelPageMap[panelId]}`);
+          console.log(`✅ Panel ${panelId} → Page ${pageNum}`);
         }
       }
     }
 
-    // ==========================================
-    // 🔥 FALLBACK: If no mappings found, use sequential
-    // ==========================================
+    // If no mappings found, use sequential mapping from all text
     if (Object.keys(panelPageMap).length === 0) {
-      console.log('⚠️ No panel numbers found in PDF. Using sequential mapping...');
-      // Extract all numbers from text
-      const allNumbers = text.match(/\b(\d{1,2})\b/g) || [];
-      const uniqueNumbers = [...new Set(allNumbers.map(Number))].filter(n => n >= 1 && n <= 50).sort((a, b) => a - b);
+      console.log('⚠️ No panel numbers found per page, scanning entire text...');
       
-      uniqueNumbers.forEach((num, index) => {
+      const allNumbers = allText.match(/#(\d+)|Panel\s*(\d+)|Part\s*(\d+)|(?:MBR|CBR)\s*#(\d+)/gi) || [];
+      const uniqueNumbers = [];
+      
+      allNumbers.forEach(match => {
+        const num = parseInt(match.replace(/[^0-9]/g, ''));
+        if (num > 0 && num <= 100) {
+          uniqueNumbers.push(num);
+        }
+      });
+      
+      const sortedUnique = [...new Set(uniqueNumbers)].sort((a, b) => a - b);
+      
+      sortedUnique.forEach((num, index) => {
         const panelId = '#' + num;
         panelPageMap[panelId] = index + 1;
-        console.log(`📄 Panel ${panelId} → Page ${index + 1} (sequential fallback)`);
+        console.log(`📄 Panel ${panelId} → Page ${index + 1} (sequential)`);
       });
     }
 
@@ -203,7 +214,7 @@ async function extractPanelNumbersFromPDF(pdfPath) {
 }
 
 // ==========================================
-// 🔥 Get PDF page as response
+// Get PDF page
 // ==========================================
 async function getPDFPage(pdfPath, pageNumber) {
   try {
@@ -211,12 +222,10 @@ async function getPDFPage(pdfPath, pageNumber) {
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const totalPages = pdfDoc.getPageCount();
     
-    // Validate page number
     if (pageNumber < 1 || pageNumber > totalPages) {
       pageNumber = 1;
     }
     
-    // Create new PDF with only the requested page
     const newPdf = await PDFDocument.create();
     const [page] = await newPdf.copyPages(pdfDoc, [pageNumber - 1]);
     newPdf.addPage(page);
@@ -258,11 +267,7 @@ const upload = multer({
 });
 
 // ==========================================
-// ROUTES
-// ==========================================
-
-// ==========================================
-// 🔥 UPLOAD - OCR runs ONCE here
+// UPLOAD ROUTE
 // ==========================================
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
@@ -356,25 +361,22 @@ app.post("/api/upload", upload.fields([
     }
 
     // ==========================================
-    // 🔥 OCR: Run ONCE during upload
+    // 🔥 OCR: Run with PDF.js + Tesseract
     // ==========================================
     let panelPageMap = {};
     let stickerPDFPath = null;
 
     if (pdfFile) {
       try {
-        // Save PDF file
         const pdfFileName = `sticker_${Date.now()}.pdf`;
         const pdfSavePath = path.join('./uploads', pdfFileName);
         fs.copyFileSync(pdfFile.path, pdfSavePath);
         stickerPDFPath = pdfSavePath;
 
-        // Run OCR to extract panel numbers
         console.log('🔍 Running OCR on PDF...');
         panelPageMap = await extractPanelNumbersFromPDF(pdfFile.path);
         console.log('✅ OCR Complete. Found', Object.keys(panelPageMap).length, 'panel mappings');
 
-        // Clean up temp file
         if (fs.existsSync(pdfFile.path)) {
           fs.unlinkSync(pdfFile.path);
         }
@@ -386,11 +388,23 @@ app.post("/api/upload", upload.fields([
       }
     }
 
+    // If still no mapping, create sequential mapping
+    if (Object.keys(panelPageMap).length === 0) {
+      console.log('⚠️ No mapping found. Creating sequential mapping...');
+      const sortedPanels = [...panels].sort((a, b) => {
+        const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
+        const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
+        return numA - numB;
+      });
+      
+      sortedPanels.forEach((panel, index) => {
+        panelPageMap[panel.id] = index + 1;
+        console.log(`📄 Panel ${panel.id} → Page ${index + 1} (sequential)`);
+      });
+    }
+
     const totalPrice = panels.reduce((sum, p) => sum + (p.price || 0), 0);
 
-    // ==========================================
-    // 🔥 Save project with panelPageMap
-    // ==========================================
     const project = new Project({
       name: projectName,
       panels: panels,
@@ -402,7 +416,6 @@ app.post("/api/upload", upload.fields([
 
     await project.save();
 
-    // Cleanup uploaded files
     try {
       if (excelFile && fs.existsSync(excelFile.path)) {
         fs.unlinkSync(excelFile.path);
@@ -417,9 +430,7 @@ app.post("/api/upload", upload.fields([
       success: true,
       project: project,
       message: `Uploaded ${panels.length} panels with ${Object.keys(panelPageMap).length} sticker mappings`,
-      debug: {
-        panelPageMap: panelPageMap
-      }
+      mapping: panelPageMap
     });
 
   } catch (error) {
@@ -432,35 +443,7 @@ app.post("/api/upload", upload.fields([
 });
 
 // ==========================================
-// 🔥 UPDATE MAPPING - Manual Fix
-// ==========================================
-app.put("/api/projects/:id/mapping", async (req, res) => {
-  try {
-    const { panelPageMap } = req.body;
-    const project = await Project.findById(req.params.id);
-    
-    if (!project) {
-      return res.status(404).json({ success: false, message: 'Project not found' });
-    }
-
-    project.panelPageMap = panelPageMap;
-    project.stickerCount = Object.keys(panelPageMap).length;
-    await project.save();
-
-    io.emit('refresh');
-
-    res.json({
-      success: true,
-      message: `Updated mapping with ${Object.keys(panelPageMap).length} stickers`
-    });
-  } catch (error) {
-    console.error('Update mapping error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==========================================
-// GET ALL PROJECTS
+// GET PROJECTS
 // ==========================================
 app.get("/api/projects", async (req, res) => {
   try {
@@ -472,9 +455,6 @@ app.get("/api/projects", async (req, res) => {
   }
 });
 
-// ==========================================
-// GET SINGLE PROJECT
-// ==========================================
 app.get("/api/projects/:id", async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -529,6 +509,34 @@ app.put("/api/projects/:id/status", async (req, res) => {
 });
 
 // ==========================================
+// UPDATE MAPPING
+// ==========================================
+app.put("/api/projects/:id/mapping", async (req, res) => {
+  try {
+    const { panelPageMap } = req.body;
+    const project = await Project.findById(req.params.id);
+    
+    if (!project) {
+      return res.status(404).json({ success: false, message: 'Project not found' });
+    }
+
+    project.panelPageMap = panelPageMap;
+    project.stickerCount = Object.keys(panelPageMap).length;
+    await project.save();
+
+    io.emit('refresh');
+
+    res.json({
+      success: true,
+      message: `Updated mapping with ${Object.keys(panelPageMap).length} stickers`
+    });
+  } catch (error) {
+    console.error('Update mapping error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==========================================
 // DELETE PROJECT
 // ==========================================
 app.delete("/api/projects/:id", async (req, res) => {
@@ -538,7 +546,6 @@ app.delete("/api/projects/:id", async (req, res) => {
       return res.status(404).json({ success: false });
     }
 
-    // Delete sticker PDF if exists
     if (project.stickerPDFPath && fs.existsSync(project.stickerPDFPath)) {
       fs.unlinkSync(project.stickerPDFPath);
     }
@@ -555,7 +562,7 @@ app.delete("/api/projects/:id", async (req, res) => {
 });
 
 // ==========================================
-// 🔥 GET STICKER - INSTANT (No OCR, No Split)
+// GET STICKER
 // ==========================================
 app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
   try {
@@ -566,15 +573,11 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
 
-    // Check if panelPageMap exists
     if (!project.panelPageMap || Object.keys(project.panelPageMap).length === 0) {
       return res.status(404).json({ success: false, message: 'No sticker mapping found for this project' });
     }
 
-    // Get panel ID with #
     const panelId = '#' + panelNumber;
-    
-    // Get page number from mapping
     const pageNumber = project.panelPageMap[panelId];
     
     if (!pageNumber) {
@@ -585,23 +588,18 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
       });
     }
 
-    // Check if PDF exists
     if (!project.stickerPDFPath || !fs.existsSync(project.stickerPDFPath)) {
       return res.status(404).json({ success: false, message: 'Sticker PDF file not found' });
     }
 
     console.log(`📄 Panel ${panelId} → PDF Page ${pageNumber}`);
 
-    // ==========================================
-    // 🔥 Get only the requested page
-    // ==========================================
     const pdfBytes = await getPDFPage(project.stickerPDFPath, pageNumber);
     
     if (!pdfBytes) {
       return res.status(500).json({ success: false, message: 'Failed to extract PDF page' });
     }
 
-    // Send PDF page
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="sticker_${panelId}.pdf"`);
     res.setHeader('Cache-Control', 'no-cache');
@@ -614,7 +612,7 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
 });
 
 // ==========================================
-// 🔥 PRINT ALL STICKERS - HTML VIEW
+// PRINT ALL STICKERS
 // ==========================================
 app.get("/api/projects/:id/print-stickers", async (req, res) => {
   try {
