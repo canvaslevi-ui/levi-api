@@ -9,9 +9,6 @@ const XLSX = require("xlsx");
 const fs = require("fs");
 const path = require("path");
 const { PDFDocument } = require('pdf-lib');
-const { createCanvas } = require('canvas');
-const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
-const Tesseract = require('tesseract.js');
 
 const app = express();
 app.use(cors());
@@ -118,6 +115,9 @@ function getPanelPrice(length, width) {
   return prices[key] || 1000;
 }
 
+// ==========================================
+// 🔥 OCR - Extract panel numbers from PDF text
+// ==========================================
 function extractPanelNumberFromText(text) {
   const patterns = [
     /#(\d+)/,
@@ -136,68 +136,55 @@ function extractPanelNumberFromText(text) {
   return null;
 }
 
-// ==========================================
-// 🔥 OCR with PDF.js + Tesseract + Canvas
-// ==========================================
 async function extractPanelNumbersFromPDF(pdfPath) {
   try {
-    console.log('🔍 Running OCR with PDF.js + Tesseract...');
-    
-    const data = new Uint8Array(fs.readFileSync(pdfPath));
-    const pdf = await pdfjsLib.getDocument({ data }).promise;
-    const totalPages = pdf.numPages;
-    
+    const pdfBytes = fs.readFileSync(pdfPath);
+    const pdfData = await pdfParse(pdfBytes);
+    const text = pdfData.text;
+    const totalPages = pdfData.numpages;
+
     console.log('📄 Total PDF Pages:', totalPages);
+    console.log('🔍 Running OCR to extract panel numbers...');
 
     const panelPageMap = {};
-    let allText = '';
+    const lines = text.split('\n').filter(line => line.trim());
 
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      console.log(`📄 Processing Page ${pageNum}/${totalPages}...`);
+      const pageText = lines.join(' ');
       
-      const page = await pdf.getPage(pageNum);
-      const viewport = page.getViewport({ scale: 2.5 });
+      let panelNumber = null;
+      let panelId = null;
       
-      const canvas = createCanvas(viewport.width, viewport.height);
-      const ctx = canvas.getContext('2d');
+      const patterns = [
+        /#(\d+)/,
+        /Panel\s*#?(\d+)/i,
+        /Part\s*#?(\d+)/i,
+        /(?:MBR|CBR)\s*#(\d+)/i,
+        /(?:GF|FF)\s*(?:MBR|CBR)\s*#(\d+)/i
+      ];
       
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      
-      const imageData = canvas.toDataURL('image/png');
-      
-      const result = await Tesseract.recognize(imageData, 'eng');
-      const text = result.data.text;
-      
-      allText += text + '\n';
-      
-      const panelNumber = extractPanelNumberFromText(text);
-      
-      if (panelNumber) {
-        const panelId = '#' + panelNumber;
-        if (!panelPageMap[panelId]) {
-          panelPageMap[panelId] = pageNum;
-          console.log(`✅ Panel ${panelId} → Page ${pageNum}`);
+      for (const pattern of patterns) {
+        const match = pageText.match(pattern);
+        if (match) {
+          panelNumber = parseInt(match[1]);
+          panelId = '#' + panelNumber;
+          console.log(`📄 Page ${pageNum}: Found ${panelId}`);
+          break;
         }
+      }
+      
+      if (panelId && !panelPageMap[panelId]) {
+        panelPageMap[panelId] = pageNum;
       }
     }
 
-    // If no mappings found, use sequential mapping from all text
+    // If no mappings found, create sequential mapping from all text
     if (Object.keys(panelPageMap).length === 0) {
-      console.log('⚠️ No panel numbers found per page, scanning entire text...');
+      console.log('⚠️ No panel numbers found. Creating sequential mapping...');
+      const allNumbers = text.match(/\b(\d{1,2})\b/g) || [];
+      const uniqueNumbers = [...new Set(allNumbers.map(Number))].filter(n => n >= 1 && n <= 50).sort((a, b) => a - b);
       
-      const allNumbers = allText.match(/#(\d+)|Panel\s*(\d+)|Part\s*(\d+)|(?:MBR|CBR)\s*#(\d+)/gi) || [];
-      const uniqueNumbers = [];
-      
-      allNumbers.forEach(match => {
-        const num = parseInt(match.replace(/[^0-9]/g, ''));
-        if (num > 0 && num <= 100) {
-          uniqueNumbers.push(num);
-        }
-      });
-      
-      const sortedUnique = [...new Set(uniqueNumbers)].sort((a, b) => a - b);
-      
-      sortedUnique.forEach((num, index) => {
+      uniqueNumbers.forEach((num, index) => {
         const panelId = '#' + num;
         panelPageMap[panelId] = index + 1;
         console.log(`📄 Panel ${panelId} → Page ${index + 1} (sequential)`);
@@ -214,10 +201,15 @@ async function extractPanelNumbersFromPDF(pdfPath) {
 }
 
 // ==========================================
-// Get PDF page
+// 🔥 Get PDF page
 // ==========================================
 async function getPDFPage(pdfPath, pageNumber) {
   try {
+    if (!fs.existsSync(pdfPath)) {
+      console.error(`❌ PDF file not found: ${pdfPath}`);
+      return null;
+    }
+
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const totalPages = pdfDoc.getPageCount();
@@ -267,7 +259,11 @@ const upload = multer({
 });
 
 // ==========================================
-// UPLOAD ROUTE
+// ROUTES
+// ==========================================
+
+// ==========================================
+// UPLOAD
 // ==========================================
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
@@ -361,17 +357,26 @@ app.post("/api/upload", upload.fields([
     }
 
     // ==========================================
-    // 🔥 OCR: Run with PDF.js + Tesseract
+    // PROCESS PDF
     // ==========================================
     let panelPageMap = {};
     let stickerPDFPath = null;
 
     if (pdfFile) {
       try {
+        const uploadsDir = path.join(__dirname, 'uploads');
+        if (!fs.existsSync(uploadsDir)) {
+          fs.mkdirSync(uploadsDir, { recursive: true });
+        }
+
         const pdfFileName = `sticker_${Date.now()}.pdf`;
-        const pdfSavePath = path.join('./uploads', pdfFileName);
+        const pdfSavePath = path.join(uploadsDir, pdfFileName);
+        
+        console.log(`📄 Saving PDF to: ${pdfSavePath}`);
         fs.copyFileSync(pdfFile.path, pdfSavePath);
         stickerPDFPath = pdfSavePath;
+        
+        console.log(`✅ PDF saved, size: ${fs.statSync(pdfSavePath).size} bytes`);
 
         console.log('🔍 Running OCR on PDF...');
         panelPageMap = await extractPanelNumbersFromPDF(pdfFile.path);
@@ -388,7 +393,7 @@ app.post("/api/upload", upload.fields([
       }
     }
 
-    // If still no mapping, create sequential mapping
+    // If no mapping, create sequential mapping
     if (Object.keys(panelPageMap).length === 0) {
       console.log('⚠️ No mapping found. Creating sequential mapping...');
       const sortedPanels = [...panels].sort((a, b) => {
@@ -443,7 +448,7 @@ app.post("/api/upload", upload.fields([
 });
 
 // ==========================================
-// GET PROJECTS
+// GET ALL PROJECTS
 // ==========================================
 app.get("/api/projects", async (req, res) => {
   try {
@@ -455,6 +460,9 @@ app.get("/api/projects", async (req, res) => {
   }
 });
 
+// ==========================================
+// GET SINGLE PROJECT
+// ==========================================
 app.get("/api/projects/:id", async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -567,6 +575,8 @@ app.delete("/api/projects/:id", async (req, res) => {
 app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
   try {
     const { id, panelNumber } = req.params;
+    console.log(`📄 Request: Panel #${panelNumber}`);
+    
     const project = await Project.findById(id);
     
     if (!project) {
@@ -574,7 +584,10 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
     }
 
     if (!project.panelPageMap || Object.keys(project.panelPageMap).length === 0) {
-      return res.status(404).json({ success: false, message: 'No sticker mapping found for this project' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No sticker mapping found. Please run OCR or fix mapping.'
+      });
     }
 
     const panelId = '#' + panelNumber;
@@ -583,18 +596,40 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
     if (!pageNumber) {
       return res.status(404).json({ 
         success: false, 
-        message: `Panel ${panelId} not found in sticker mapping`,
+        message: `Panel ${panelId} not found in mapping`,
         availablePanels: Object.keys(project.panelPageMap)
       });
     }
 
-    if (!project.stickerPDFPath || !fs.existsSync(project.stickerPDFPath)) {
-      return res.status(404).json({ success: false, message: 'Sticker PDF file not found' });
+    console.log(`✅ Panel ${panelId} → PDF Page ${pageNumber}`);
+
+    // Try multiple paths
+    let pdfPath = project.stickerPDFPath;
+    const possiblePaths = [
+      pdfPath,
+      pdfPath ? path.join(__dirname, pdfPath) : null,
+      pdfPath ? path.join(__dirname, 'uploads', path.basename(pdfPath)) : null,
+      pdfPath ? path.join(process.cwd(), pdfPath) : null,
+      pdfPath ? path.join(process.cwd(), 'uploads', path.basename(pdfPath)) : null
+    ];
+
+    let foundPath = null;
+    for (const tryPath of possiblePaths) {
+      if (tryPath && fs.existsSync(tryPath)) {
+        foundPath = tryPath;
+        console.log(`✅ Found PDF at: ${tryPath}`);
+        break;
+      }
     }
 
-    console.log(`📄 Panel ${panelId} → PDF Page ${pageNumber}`);
+    if (!foundPath) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Sticker PDF file not found on server'
+      });
+    }
 
-    const pdfBytes = await getPDFPage(project.stickerPDFPath, pageNumber);
+    const pdfBytes = await getPDFPage(foundPath, pageNumber);
     
     if (!pdfBytes) {
       return res.status(500).json({ success: false, message: 'Failed to extract PDF page' });
@@ -607,6 +642,59 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
 
   } catch (error) {
     console.error('Sticker fetch error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==========================================
+// DEBUG: Check PDF
+// ==========================================
+app.get("/api/debug/pdf/:projectId", async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.projectId);
+    if (!project) {
+      return res.json({ success: false, message: 'Project not found' });
+    }
+
+    const result = {
+      projectName: project.name,
+      stickerPDFPath: project.stickerPDFPath,
+      fileExists: false,
+      absolutePath: null,
+      fileSize: null,
+      uploadsFolder: [],
+      cwd: process.cwd(),
+      __dirname: __dirname
+    };
+
+    if (project.stickerPDFPath) {
+      const pathsToCheck = [
+        project.stickerPDFPath,
+        path.join(__dirname, project.stickerPDFPath),
+        path.join(process.cwd(), project.stickerPDFPath),
+        path.join(__dirname, 'uploads', path.basename(project.stickerPDFPath)),
+        path.join(process.cwd(), 'uploads', path.basename(project.stickerPDFPath))
+      ];
+
+      for (const checkPath of pathsToCheck) {
+        if (checkPath && fs.existsSync(checkPath)) {
+          result.fileExists = true;
+          result.absolutePath = checkPath;
+          const stats = fs.statSync(checkPath);
+          result.fileSize = stats.size;
+          result.fileSizeKB = (stats.size / 1024).toFixed(2);
+          break;
+        }
+      }
+    }
+
+    const uploadsDir = path.join(__dirname, 'uploads');
+    if (fs.existsSync(uploadsDir)) {
+      result.uploadsFolder = fs.readdirSync(uploadsDir);
+    }
+
+    res.json({ success: true, data: result });
+  } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });
