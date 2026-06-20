@@ -6,6 +6,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const multer = require("multer");
 const XLSX = require("xlsx");
+const PDFParse = require("pdf-parse");
 const fs = require("fs");
 const path = require("path");
 const { PDFDocument } = require('pdf-lib');
@@ -31,6 +32,7 @@ mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => {
     console.error('❌ MongoDB Connection Error:', err.message);
+    console.log('⚠️ Server will continue without database - uploads will fail');
   });
 
 // ===== SCHEMA =====
@@ -47,7 +49,9 @@ const PanelSchema = new mongoose.Schema({
     seq: Number
   }],
   totalGroupQty: Number,
-  price: { type: Number, default: 0 }
+  price: { type: Number, default: 0 },
+  stickerPage: { type: Number },
+  stickerFileName: { type: String }
 });
 
 const ProjectSchema = new mongoose.Schema({
@@ -55,9 +59,7 @@ const ProjectSchema = new mongoose.Schema({
   panels: [PanelSchema],
   createdAt: { type: Date, default: Date.now },
   totalPrice: { type: Number, default: 0 },
-  stickerCount: { type: Number, default: 0 },
-  panelPageMap: { type: Object, default: {} },
-  stickerPDFPath: { type: String }
+  stickerCount: { type: Number, default: 0 }
 });
 
 ProjectSchema.index({ name: 1 });
@@ -115,117 +117,68 @@ function getPanelPrice(length, width) {
   return prices[key] || 1000;
 }
 
-// ==========================================
-// 🔥 OCR - Extract panel numbers from PDF text
-// ==========================================
-function extractPanelNumberFromText(text) {
-  const patterns = [
-    /#(\d+)/,
-    /Panel\s*#?(\d+)/i,
-    /Part\s*#?(\d+)/i,
-    /(?:MBR|CBR)\s*#(\d+)/i,
-    /(?:GF|FF)\s*(?:MBR|CBR)\s*#(\d+)/i
-  ];
-  
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      return parseInt(match[1]);
-    }
-  }
-  return null;
-}
-
-async function extractPanelNumbersFromPDF(pdfPath) {
+async function splitPDFIntoStickers(pdfPath, panelCount) {
   try {
-    const pdfBytes = fs.readFileSync(pdfPath);
-    const pdfData = await pdfParse(pdfBytes);
-    const text = pdfData.text;
-    const totalPages = pdfData.numpages;
-
-    console.log('📄 Total PDF Pages:', totalPages);
-    console.log('🔍 Running OCR to extract panel numbers...');
-
-    const panelPageMap = {};
-    const lines = text.split('\n').filter(line => line.trim());
-
-    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      const pageText = lines.join(' ');
-      
-      let panelNumber = null;
-      let panelId = null;
-      
-      const patterns = [
-        /#(\d+)/,
-        /Panel\s*#?(\d+)/i,
-        /Part\s*#?(\d+)/i,
-        /(?:MBR|CBR)\s*#(\d+)/i,
-        /(?:GF|FF)\s*(?:MBR|CBR)\s*#(\d+)/i
-      ];
-      
-      for (const pattern of patterns) {
-        const match = pageText.match(pattern);
-        if (match) {
-          panelNumber = parseInt(match[1]);
-          panelId = '#' + panelNumber;
-          console.log(`📄 Page ${pageNum}: Found ${panelId}`);
-          break;
-        }
-      }
-      
-      if (panelId && !panelPageMap[panelId]) {
-        panelPageMap[panelId] = pageNum;
-      }
-    }
-
-    // If no mappings found, create sequential mapping from all text
-    if (Object.keys(panelPageMap).length === 0) {
-      console.log('⚠️ No panel numbers found. Creating sequential mapping...');
-      const allNumbers = text.match(/\b(\d{1,2})\b/g) || [];
-      const uniqueNumbers = [...new Set(allNumbers.map(Number))].filter(n => n >= 1 && n <= 50).sort((a, b) => a - b);
-      
-      uniqueNumbers.forEach((num, index) => {
-        const panelId = '#' + num;
-        panelPageMap[panelId] = index + 1;
-        console.log(`📄 Panel ${panelId} → Page ${index + 1} (sequential)`);
-      });
-    }
-
-    console.log('📊 Panel → Page Mapping:', panelPageMap);
-    return panelPageMap;
-
-  } catch (error) {
-    console.error('OCR Error:', error);
-    return {};
-  }
-}
-
-// ==========================================
-// 🔥 Get PDF page
-// ==========================================
-async function getPDFPage(pdfPath, pageNumber) {
-  try {
-    if (!fs.existsSync(pdfPath)) {
-      console.error(`❌ PDF file not found: ${pdfPath}`);
-      return null;
-    }
-
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const totalPages = pdfDoc.getPageCount();
     
-    if (pageNumber < 1 || pageNumber > totalPages) {
-      pageNumber = 1;
+    const stickerFiles = [];
+    const stickersDir = path.join('./uploads', 'stickers');
+    
+    if (!fs.existsSync(stickersDir)) {
+      fs.mkdirSync(stickersDir, { recursive: true });
+    }
+
+    // Each page becomes an individual sticker PDF
+    for (let i = 0; i < Math.min(totalPages, panelCount); i++) {
+      const newPdf = await PDFDocument.create();
+      const [page] = await newPdf.copyPages(pdfDoc, [i]);
+      newPdf.addPage(page);
+      
+      const bytes = await newPdf.save();
+      const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+      const filePath = path.join(stickersDir, fileName);
+      fs.writeFileSync(filePath, bytes);
+      stickerFiles.push(fileName);
+    }
+
+    // If more panels than pages, duplicate last page
+    if (panelCount > totalPages) {
+      for (let i = totalPages; i < panelCount; i++) {
+        const lastPage = totalPages - 1;
+        const newPdf = await PDFDocument.create();
+        const [page] = await newPdf.copyPages(pdfDoc, [lastPage]);
+        newPdf.addPage(page);
+        
+        const bytes = await newPdf.save();
+        const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+        const filePath = path.join(stickersDir, fileName);
+        fs.writeFileSync(filePath, bytes);
+        stickerFiles.push(fileName);
+      }
+    }
+
+    return stickerFiles;
+  } catch (error) {
+    console.error("PDF Split Error:", error);
+    // If splitting fails, create dummy stickers
+    const stickersDir = path.join('./uploads', 'stickers');
+    if (!fs.existsSync(stickersDir)) {
+      fs.mkdirSync(stickersDir, { recursive: true });
     }
     
-    const newPdf = await PDFDocument.create();
-    const [page] = await newPdf.copyPages(pdfDoc, [pageNumber - 1]);
-    newPdf.addPage(page);
-    
-    return await newPdf.save();
-  } catch (error) {
-    console.error('Get PDF Page Error:', error);
-    return null;
+    const stickerFiles = [];
+    for (let i = 0; i < panelCount; i++) {
+      const fileName = `sticker_${Date.now()}_${i + 1}.pdf`;
+      const filePath = path.join(stickersDir, fileName);
+      const newPdf = await PDFDocument.create();
+      newPdf.addPage([200, 200]);
+      const bytes = await newPdf.save();
+      fs.writeFileSync(filePath, bytes);
+      stickerFiles.push(fileName);
+    }
+    return stickerFiles;
   }
 }
 
@@ -263,7 +216,7 @@ const upload = multer({
 // ==========================================
 
 // ==========================================
-// UPLOAD
+// UPLOAD PROJECT WITH STICKER SPLITTING
 // ==========================================
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
@@ -356,56 +309,28 @@ app.post("/api/upload", upload.fields([
       });
     }
 
-    // ==========================================
-    // PROCESS PDF
-    // ==========================================
-    let panelPageMap = {};
-    let stickerPDFPath = null;
+    // ===== PROCESS PDF AND SPLIT INTO INDIVIDUAL STICKERS =====
+    let stickerFiles = [];
+    let stickerCount = 0;
 
     if (pdfFile) {
       try {
-        const uploadsDir = path.join(__dirname, 'uploads');
-        if (!fs.existsSync(uploadsDir)) {
-          fs.mkdirSync(uploadsDir, { recursive: true });
-        }
-
-        const pdfFileName = `sticker_${Date.now()}.pdf`;
-        const pdfSavePath = path.join(uploadsDir, pdfFileName);
+        stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels.length);
+        stickerCount = stickerFiles.length;
         
-        console.log(`📄 Saving PDF to: ${pdfSavePath}`);
-        fs.copyFileSync(pdfFile.path, pdfSavePath);
-        stickerPDFPath = pdfSavePath;
-        
-        console.log(`✅ PDF saved, size: ${fs.statSync(pdfSavePath).size} bytes`);
-
-        console.log('🔍 Running OCR on PDF...');
-        panelPageMap = await extractPanelNumbersFromPDF(pdfFile.path);
-        console.log('✅ OCR Complete. Found', Object.keys(panelPageMap).length, 'panel mappings');
-
-        if (fs.existsSync(pdfFile.path)) {
-          fs.unlinkSync(pdfFile.path);
-        }
+        panels.forEach((panel, index) => {
+          if (index < stickerFiles.length) {
+            panel.stickerFileName = stickerFiles[index];
+            panel.stickerPage = index + 1;
+          } else {
+            const lastIndex = stickerFiles.length - 1;
+            panel.stickerFileName = stickerFiles[lastIndex] || null;
+            panel.stickerPage = lastIndex + 1;
+          }
+        });
       } catch (pdfErr) {
         console.error("PDF Processing Error:", pdfErr);
-        if (fs.existsSync(pdfFile.path)) {
-          fs.unlinkSync(pdfFile.path);
-        }
       }
-    }
-
-    // If no mapping, create sequential mapping
-    if (Object.keys(panelPageMap).length === 0) {
-      console.log('⚠️ No mapping found. Creating sequential mapping...');
-      const sortedPanels = [...panels].sort((a, b) => {
-        const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
-        const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
-        return numA - numB;
-      });
-      
-      sortedPanels.forEach((panel, index) => {
-        panelPageMap[panel.id] = index + 1;
-        console.log(`📄 Panel ${panel.id} → Page ${index + 1} (sequential)`);
-      });
     }
 
     const totalPrice = panels.reduce((sum, p) => sum + (p.price || 0), 0);
@@ -414,16 +339,18 @@ app.post("/api/upload", upload.fields([
       name: projectName,
       panels: panels,
       totalPrice: totalPrice,
-      stickerCount: Object.keys(panelPageMap).length,
-      panelPageMap: panelPageMap,
-      stickerPDFPath: stickerPDFPath
+      stickerCount: stickerCount
     });
 
     await project.save();
 
+    // Cleanup uploaded files
     try {
       if (excelFile && fs.existsSync(excelFile.path)) {
         fs.unlinkSync(excelFile.path);
+      }
+      if (pdfFile && fs.existsSync(pdfFile.path)) {
+        fs.unlinkSync(pdfFile.path);
       }
     } catch (cleanErr) {
       console.log("Cleanup error:", cleanErr);
@@ -434,12 +361,24 @@ app.post("/api/upload", upload.fields([
     res.json({
       success: true,
       project: project,
-      message: `Uploaded ${panels.length} panels with ${Object.keys(panelPageMap).length} sticker mappings`,
-      mapping: panelPageMap
+      message: `Uploaded ${panels.length} panels with ${stickerCount} stickers`
     });
 
   } catch (error) {
     console.error('Upload error:', error);
+    // Clean up files on error
+    try {
+      if (req.files) {
+        Object.keys(req.files).forEach(key => {
+          req.files[key].forEach(file => {
+            if (fs.existsSync(file.path)) {
+              fs.unlinkSync(file.path);
+            }
+          });
+        });
+      }
+    } catch (e) {}
+    
     res.status(500).json({ 
       success: false, 
       message: error.message || 'Upload failed' 
@@ -517,34 +456,6 @@ app.put("/api/projects/:id/status", async (req, res) => {
 });
 
 // ==========================================
-// UPDATE MAPPING
-// ==========================================
-app.put("/api/projects/:id/mapping", async (req, res) => {
-  try {
-    const { panelPageMap } = req.body;
-    const project = await Project.findById(req.params.id);
-    
-    if (!project) {
-      return res.status(404).json({ success: false, message: 'Project not found' });
-    }
-
-    project.panelPageMap = panelPageMap;
-    project.stickerCount = Object.keys(panelPageMap).length;
-    await project.save();
-
-    io.emit('refresh');
-
-    res.json({
-      success: true,
-      message: `Updated mapping with ${Object.keys(panelPageMap).length} stickers`
-    });
-  } catch (error) {
-    console.error('Update mapping error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==========================================
 // DELETE PROJECT
 // ==========================================
 app.delete("/api/projects/:id", async (req, res) => {
@@ -554,9 +465,16 @@ app.delete("/api/projects/:id", async (req, res) => {
       return res.status(404).json({ success: false });
     }
 
-    if (project.stickerPDFPath && fs.existsSync(project.stickerPDFPath)) {
-      fs.unlinkSync(project.stickerPDFPath);
-    }
+    // Delete sticker files
+    const stickersDir = path.join('./uploads', 'stickers');
+    project.panels.forEach(panel => {
+      if (panel.stickerFileName) {
+        const stickerPath = path.join(stickersDir, panel.stickerFileName);
+        if (fs.existsSync(stickerPath)) {
+          fs.unlinkSync(stickerPath);
+        }
+      }
+    });
 
     await Project.findByIdAndDelete(req.params.id);
     io.emit("refresh");
@@ -570,75 +488,38 @@ app.delete("/api/projects/:id", async (req, res) => {
 });
 
 // ==========================================
-// GET STICKER
+// GET INDIVIDUAL STICKER - ORIGINAL PDF
 // ==========================================
-app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
+app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
   try {
-    const { id, panelNumber } = req.params;
-    console.log(`📄 Request: Panel #${panelNumber}`);
-    
+    const { id, panelId } = req.params;
     const project = await Project.findById(id);
     
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
 
-    if (!project.panelPageMap || Object.keys(project.panelPageMap).length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No sticker mapping found. Please run OCR or fix mapping.'
-      });
+    const panel = project.panels.find(p => normalize(p.id) === normalize(panelId));
+    if (!panel) {
+      return res.status(404).json({ success: false, message: 'Panel not found' });
     }
 
-    const panelId = '#' + panelNumber;
-    const pageNumber = project.panelPageMap[panelId];
-    
-    if (!pageNumber) {
-      return res.status(404).json({ 
-        success: false, 
-        message: `Panel ${panelId} not found in mapping`,
-        availablePanels: Object.keys(project.panelPageMap)
-      });
+    if (!panel.stickerFileName) {
+      return res.status(404).json({ success: false, message: 'No sticker assigned to this panel' });
     }
 
-    console.log(`✅ Panel ${panelId} → PDF Page ${pageNumber}`);
-
-    // Try multiple paths
-    let pdfPath = project.stickerPDFPath;
-    const possiblePaths = [
-      pdfPath,
-      pdfPath ? path.join(__dirname, pdfPath) : null,
-      pdfPath ? path.join(__dirname, 'uploads', path.basename(pdfPath)) : null,
-      pdfPath ? path.join(process.cwd(), pdfPath) : null,
-      pdfPath ? path.join(process.cwd(), 'uploads', path.basename(pdfPath)) : null
-    ];
-
-    let foundPath = null;
-    for (const tryPath of possiblePaths) {
-      if (tryPath && fs.existsSync(tryPath)) {
-        foundPath = tryPath;
-        console.log(`✅ Found PDF at: ${tryPath}`);
-        break;
-      }
+    const stickerPath = path.join('./uploads', 'stickers', panel.stickerFileName);
+    if (!fs.existsSync(stickerPath)) {
+      return res.status(404).json({ success: false, message: 'Sticker file not found' });
     }
 
-    if (!foundPath) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Sticker PDF file not found on server'
-      });
-    }
+    console.log(`📄 Serving sticker: ${panel.stickerFileName} for panel ${panelId}`);
 
-    const pdfBytes = await getPDFPage(foundPath, pageNumber);
-    
-    if (!pdfBytes) {
-      return res.status(500).json({ success: false, message: 'Failed to extract PDF page' });
-    }
-
+    // Send the original PDF file
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="sticker_${panelId}.pdf"`);
+    res.setHeader('Content-Disposition', `inline; filename="${panel.stickerFileName}"`);
     res.setHeader('Cache-Control', 'no-cache');
-    res.send(pdfBytes);
+    res.sendFile(path.resolve(stickerPath));
 
   } catch (error) {
     console.error('Sticker fetch error:', error);
@@ -647,60 +528,7 @@ app.get("/api/projects/:id/sticker/:panelNumber", async (req, res) => {
 });
 
 // ==========================================
-// DEBUG: Check PDF
-// ==========================================
-app.get("/api/debug/pdf/:projectId", async (req, res) => {
-  try {
-    const project = await Project.findById(req.params.projectId);
-    if (!project) {
-      return res.json({ success: false, message: 'Project not found' });
-    }
-
-    const result = {
-      projectName: project.name,
-      stickerPDFPath: project.stickerPDFPath,
-      fileExists: false,
-      absolutePath: null,
-      fileSize: null,
-      uploadsFolder: [],
-      cwd: process.cwd(),
-      __dirname: __dirname
-    };
-
-    if (project.stickerPDFPath) {
-      const pathsToCheck = [
-        project.stickerPDFPath,
-        path.join(__dirname, project.stickerPDFPath),
-        path.join(process.cwd(), project.stickerPDFPath),
-        path.join(__dirname, 'uploads', path.basename(project.stickerPDFPath)),
-        path.join(process.cwd(), 'uploads', path.basename(project.stickerPDFPath))
-      ];
-
-      for (const checkPath of pathsToCheck) {
-        if (checkPath && fs.existsSync(checkPath)) {
-          result.fileExists = true;
-          result.absolutePath = checkPath;
-          const stats = fs.statSync(checkPath);
-          result.fileSize = stats.size;
-          result.fileSizeKB = (stats.size / 1024).toFixed(2);
-          break;
-        }
-      }
-    }
-
-    const uploadsDir = path.join(__dirname, 'uploads');
-    if (fs.existsSync(uploadsDir)) {
-      result.uploadsFolder = fs.readdirSync(uploadsDir);
-    }
-
-    res.json({ success: true, data: result });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// ==========================================
-// PRINT ALL STICKERS
+// PRINT ALL STICKERS - HTML VIEW
 // ==========================================
 app.get("/api/projects/:id/print-stickers", async (req, res) => {
   try {
@@ -731,7 +559,6 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
         .sticker-barcode{margin-top:8px;text-align:center;font-family:'Courier New',monospace;font-size:18px;letter-spacing:3px;padding:4px;background:#f8f8f8;border-radius:4px;}
         .sticker-footer{margin-top:8px;font-size:9px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:6px;}
         .sticker .price{color:#22c55e;font-weight:bold;}
-        .sticker .page-info{color:#3b82f6;font-weight:bold;}
         @media print{body{background:white;padding:10px;} .sticker{border:1px solid #999;box-shadow:none;} .sticker-grid{gap:10px;}}
         @media (max-width:768px){.sticker-grid{grid-template-columns:repeat(2,1fr);}}
         @media (max-width:480px){.sticker-grid{grid-template-columns:1fr;}}
@@ -745,21 +572,13 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
       <div class="sticker-grid">
     `;
 
-    const sortedPanels = [...project.panels].sort((a, b) => {
-      const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
-      const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
-      return numA - numB;
-    });
-
-    sortedPanels.forEach(panel => {
+    project.panels.forEach(panel => {
       const item = panel.items[0];
       const statusColors = {
         pending: '#f59e0b',
         cutting: '#3b82f6',
         dispatched: '#10b981'
       };
-      
-      const pageNumber = project.panelPageMap ? project.panelPageMap[panel.id] || 'N/A' : 'N/A';
       
       html += `
         <div class="sticker">
@@ -771,7 +590,7 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
             <div><span class="label">Dimensions:</span> <span class="value">${item.length} × ${item.width} mm</span></div>
             <div><span class="label">Quantity:</span> <span class="value">${panel.totalGroupQty || 1}</span></div>
             <div><span class="label">Price:</span> <span class="value price">₹${panel.price || 0}</span></div>
-            <div><span class="label">PDF Page:</span> <span class="value page-info">${pageNumber}</span></div>
+            <div><span class="label">Page:</span> <span class="value">${panel.stickerPage || 'N/A'}</span></div>
           </div>
           <div class="sticker-barcode">${panel.id.replace('#', '')}</div>
           <div class="sticker-footer">${project.name} | ${new Date().toLocaleDateString('en-IN')}</div>
