@@ -107,49 +107,99 @@ function getPanelPrice(length, width) {
 }
 
 // ==========================================
-// REARRANGE PDF PAGES - SERVER SIDE
+// FIXED: SPLIT PDF USING OCR MAPPING
 // ==========================================
-async function rearrangePDFPages(pdfPath, panelSequence) {
+async function splitPDFUsingOCRMapping(pdfPath, panels, matchedData) {
   try {
-    // Load the PDF
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const totalPages = pdfDoc.getPageCount();
     
-    // Create mapping: panel number -> page index (0-based)
-    const panelToPageMap = {};
-    
-    // We need to OCR each page to find panel numbers
-    // For now, we'll assume the frontend provided the mapping
-    // But we need to handle this properly
-    
-    // For now, we'll use a simple approach: keep pages in order
-    // and assign based on the panel sequence from Excel
-    
-    // This is a simplified version - the frontend should send the mapping
-    
-    console.log(`📄 Rearranging ${totalPages} pages for ${panelSequence.length} panels`);
-    
-    // Create a new PDF with pages rearranged
-    const newPdfDoc = await PDFDocument.create();
-    
-    // For each panel in sequence, find the page that has that panel number
-    // This requires OCR on the server - which is heavy
-    
-    // For now, we'll just use the original PDF and let the frontend handle mapping
-    // The frontend already has the OCR results and can send the mapping
-    
-    return pdfDoc;
+    const stickersDir = path.join('./uploads', 'stickers');
+    if (!fs.existsSync(stickersDir)) {
+      fs.mkdirSync(stickersDir, { recursive: true });
+    }
+
+    // STEP 1: Build OCR mapping: panel number -> page number
+    const ocrMap = {};
+    if (matchedData && matchedData.length > 0) {
+      matchedData.forEach(match => {
+        if (match.matched && match.ocrPanel !== null) {
+          const panelNum = parseInt(match.ocrPanel);
+          const pageNum = match.page;
+          ocrMap[panelNum] = pageNum;
+          console.log(`📊 OCR Map: Panel #${panelNum} → Page ${pageNum}`);
+        }
+      });
+    }
+
+    console.log('📊 OCR Mapping Table:', ocrMap);
+
+    // STEP 2: For each panel, find its sticker page using OCR map
+    const stickerResults = [];
+
+    for (let i = 0; i < panels.length; i++) {
+      const panel = panels[i];
+      const panelId = panel.id;
+      const panelNum = parseInt(panelId.replace('#', ''));
+
+      // Find which page this panel belongs to
+      let pageNum = null;
+
+      // First, check OCR map
+      if (ocrMap[panelNum]) {
+        pageNum = ocrMap[panelNum];
+        console.log(`✅ Panel ${panelId} → OCR says Page ${pageNum}`);
+      } 
+      // If not in OCR map, check panel's own ocrPage field
+      else if (panel.ocrPage) {
+        pageNum = panel.ocrPage;
+        console.log(`📄 Panel ${panelId} → Using stored ocrPage: ${pageNum}`);
+      }
+      // Fallback: use sequential assignment (should rarely happen)
+      else {
+        pageNum = i + 1;
+        console.log(`⚠️ Panel ${panelId} → No OCR data, using sequential: ${pageNum}`);
+      }
+
+      // Ensure page number is within bounds (1 to totalPages)
+      if (pageNum < 1) pageNum = 1;
+      if (pageNum > totalPages) pageNum = totalPages;
+
+      // Convert to 0-based index for pdf-lib
+      const pageIndex = pageNum - 1;
+
+      // Create individual sticker PDF
+      const newPdf = await PDFDocument.create();
+      const [page] = await newPdf.copyPages(pdfDoc, [pageIndex]);
+      newPdf.addPage(page);
+      
+      const bytes = await newPdf.save();
+      const fileName = `sticker_${Date.now()}_${i + 1}_${panelNum}.pdf`;
+      const filePath = path.join(stickersDir, fileName);
+      fs.writeFileSync(filePath, bytes);
+
+      stickerResults.push({
+        fileName: fileName,
+        pageNumber: pageNum,
+        panelId: panelId
+      });
+
+      console.log(`📄 Created sticker for ${panelId} → Page ${pageNum} (file: ${fileName})`);
+    }
+
+    return stickerResults;
+
   } catch (error) {
-    console.error('PDF Rearrange Error:', error);
-    throw new Error('Failed to rearrange PDF: ' + error.message);
+    console.error("PDF Split Error:", error);
+    throw new Error('Failed to split PDF: ' + error.message);
   }
 }
 
 // ==========================================
-// SPLIT PDF INTO STICKERS
+// FALLBACK: SPLIT PDF SEQUENTIALLY
 // ==========================================
-async function splitPDFIntoStickers(pdfPath, panelCount) {
+async function splitPDFSequentially(pdfPath, panelCount) {
   try {
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
@@ -162,7 +212,6 @@ async function splitPDFIntoStickers(pdfPath, panelCount) {
       fs.mkdirSync(stickersDir, { recursive: true });
     }
 
-    // Each page becomes an individual sticker PDF
     for (let i = 0; i < Math.min(totalPages, panelCount); i++) {
       const newPdf = await PDFDocument.create();
       const [page] = await newPdf.copyPages(pdfDoc, [i]);
@@ -175,7 +224,6 @@ async function splitPDFIntoStickers(pdfPath, panelCount) {
       stickerFiles.push(fileName);
     }
 
-    // If more panels than pages, duplicate last page
     if (panelCount > totalPages) {
       for (let i = totalPages; i < panelCount; i++) {
         const lastPage = totalPages - 1;
@@ -233,7 +281,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // Increased to 100MB
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const allowed = ['.csv', '.xlsx', '.xls', '.pdf'];
@@ -250,7 +298,7 @@ const upload = multer({
 // ==========================================
 
 // ==========================================
-// UPLOAD PROJECT
+// FIXED: UPLOAD PROJECT
 // ==========================================
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
@@ -371,35 +419,45 @@ app.post("/api/upload", upload.fields([
       });
     }
 
-    // ===== PROCESS PDF =====
+    // ===== FIXED: PROCESS PDF USING OCR MAPPING =====
     let stickerFiles = [];
     let stickerCount = 0;
 
     if (pdfFile) {
       try {
-        // Split the PDF into individual stickers
-        // The pages are in the order they appear in the PDF
-        // But we want them in the sequence order from Excel
-        // So we need to rearrange the PDF first
-        
-        // For now, we'll split as-is and rely on the frontend to send rearranged PDF
-        stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels.length);
+        // Use the OCR mapping to assign correct pages
+        stickerFiles = await splitPDFUsingOCRMapping(
+          pdfFile.path, 
+          panels, 
+          matchedPanels
+        );
         stickerCount = stickerFiles.length;
         
-        // Assign stickers in order - this assumes PDF pages are already in the correct sequence
-        // If not, the stickers will be misassigned
+        // Assign stickers based on OCR mapping
         panels.forEach((panel, index) => {
           if (index < stickerFiles.length) {
-            panel.stickerFileName = stickerFiles[index];
-            panel.stickerPage = index + 1;
-          } else {
-            const lastIndex = stickerFiles.length - 1;
-            panel.stickerFileName = stickerFiles[lastIndex] || null;
-            panel.stickerPage = lastIndex + 1;
+            const stickerInfo = stickerFiles[index];
+            panel.stickerFileName = stickerInfo.fileName;
+            panel.stickerPage = stickerInfo.pageNumber;
+            
+            console.log(`✅ Assigned ${panel.id} → Page ${panel.stickerPage} (${panel.stickerFileName})`);
           }
         });
       } catch (pdfErr) {
         console.error("PDF Processing Error:", pdfErr);
+        // Fallback to sequential assignment
+        try {
+          console.log("⚠️ Falling back to sequential sticker assignment");
+          const fallbackStickers = await splitPDFSequentially(pdfFile.path, panels.length);
+          panels.forEach((panel, index) => {
+            if (index < fallbackStickers.length) {
+              panel.stickerFileName = fallbackStickers[index];
+              panel.stickerPage = index + 1;
+            }
+          });
+        } catch (fallbackErr) {
+          console.error("Fallback PDF processing also failed:", fallbackErr);
+        }
       }
     }
 
