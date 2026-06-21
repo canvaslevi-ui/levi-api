@@ -14,24 +14,20 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// ===== SERVER + SOCKET =====
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-// ===== CONFIG =====
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://levi:levi123@cluster0.1ot8toh.mongodb.net/leviDB?retryWrites=true&w=majority';
 
 console.log('📡 Server starting on port:', PORT);
 
-// ===== DB CONNECT =====
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => {
     console.error('❌ MongoDB Connection Error:', err.message);
-    console.log('⚠️ Server will continue without database - uploads will fail');
   });
 
 // ===== SCHEMA =====
@@ -69,7 +65,6 @@ ProjectSchema.index({ name: 1 });
 
 const Project = mongoose.model("Project", ProjectSchema);
 
-// ===== SOCKET =====
 io.on("connection", () => {
   console.log("⚡ Client Connected");
 });
@@ -102,27 +97,58 @@ function expandIds(idString) {
 function getPanelPrice(length, width) {
   const key = `${length}x${width}`;
   const prices = {
-    "383x2": 1200,
-    "308x308": 1800,
-    "422x2": 1600,
-    "531x2": 1900,
-    "821x2": 2200,
-    "106x106": 800,
-    "442x442": 2000,
-    "478x2": 1750,
-    "443x443": 2050,
-    "425x425": 1950,
-    "2396x2": 2500,
-    "1901x2": 2300,
-    "1099x2": 2100,
-    "833x833": 2800,
-    "837x425": 2600,
-    "2046x2": 2400,
+    "383x2": 1200, "308x308": 1800, "422x2": 1600, "531x2": 1900,
+    "821x2": 2200, "106x106": 800, "442x442": 2000, "478x2": 1750,
+    "443x443": 2050, "425x425": 1950, "2396x2": 2500, "1901x2": 2300,
+    "1099x2": 2100, "833x833": 2800, "837x425": 2600, "2046x2": 2400,
     "2366x2": 2450
   };
   return prices[key] || 1000;
 }
 
+// ==========================================
+// REARRANGE PDF PAGES - SERVER SIDE
+// ==========================================
+async function rearrangePDFPages(pdfPath, panelSequence) {
+  try {
+    // Load the PDF
+    const pdfBytes = fs.readFileSync(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const totalPages = pdfDoc.getPageCount();
+    
+    // Create mapping: panel number -> page index (0-based)
+    const panelToPageMap = {};
+    
+    // We need to OCR each page to find panel numbers
+    // For now, we'll assume the frontend provided the mapping
+    // But we need to handle this properly
+    
+    // For now, we'll use a simple approach: keep pages in order
+    // and assign based on the panel sequence from Excel
+    
+    // This is a simplified version - the frontend should send the mapping
+    
+    console.log(`📄 Rearranging ${totalPages} pages for ${panelSequence.length} panels`);
+    
+    // Create a new PDF with pages rearranged
+    const newPdfDoc = await PDFDocument.create();
+    
+    // For each panel in sequence, find the page that has that panel number
+    // This requires OCR on the server - which is heavy
+    
+    // For now, we'll just use the original PDF and let the frontend handle mapping
+    // The frontend already has the OCR results and can send the mapping
+    
+    return pdfDoc;
+  } catch (error) {
+    console.error('PDF Rearrange Error:', error);
+    throw new Error('Failed to rearrange PDF: ' + error.message);
+  }
+}
+
+// ==========================================
+// SPLIT PDF INTO STICKERS
+// ==========================================
 async function splitPDFIntoStickers(pdfPath, panelCount) {
   try {
     const pdfBytes = fs.readFileSync(pdfPath);
@@ -168,7 +194,6 @@ async function splitPDFIntoStickers(pdfPath, panelCount) {
     return stickerFiles;
   } catch (error) {
     console.error("PDF Split Error:", error);
-    // If splitting fails, create dummy stickers
     const stickersDir = path.join('./uploads', 'stickers');
     if (!fs.existsSync(stickersDir)) {
       fs.mkdirSync(stickersDir, { recursive: true });
@@ -208,7 +233,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 100 * 1024 * 1024 }, // Increased to 100MB
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     const allowed = ['.csv', '.xlsx', '.xls', '.pdf'];
@@ -225,7 +250,7 @@ const upload = multer({
 // ==========================================
 
 // ==========================================
-// UPLOAD PROJECT WITH STICKER SPLITTING
+// UPLOAD PROJECT
 // ==========================================
 app.post("/api/upload", upload.fields([
   { name: 'excel', maxCount: 1 },
@@ -310,7 +335,6 @@ app.post("/api/upload", upload.fields([
       ids.forEach((id, index) => {
         const price = getPanelPrice(length, width);
         
-        // Check if this panel was matched by OCR
         let matched = false;
         let ocrPanel = null;
         let ocrPage = null;
@@ -347,22 +371,27 @@ app.post("/api/upload", upload.fields([
       });
     }
 
-    // ===== PROCESS PDF AND SPLIT INTO INDIVIDUAL STICKERS =====
+    // ===== PROCESS PDF =====
     let stickerFiles = [];
     let stickerCount = 0;
 
     if (pdfFile) {
       try {
-        // The PDF is already rearranged by the frontend
-        // So we split it in order (page 1 = panel 1, page 2 = panel 2, etc.)
+        // Split the PDF into individual stickers
+        // The pages are in the order they appear in the PDF
+        // But we want them in the sequence order from Excel
+        // So we need to rearrange the PDF first
+        
+        // For now, we'll split as-is and rely on the frontend to send rearranged PDF
         stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels.length);
         stickerCount = stickerFiles.length;
         
-        // Assign stickers in order - panels are already sorted by sequence
+        // Assign stickers in order - this assumes PDF pages are already in the correct sequence
+        // If not, the stickers will be misassigned
         panels.forEach((panel, index) => {
           if (index < stickerFiles.length) {
             panel.stickerFileName = stickerFiles[index];
-            panel.stickerPage = index + 1; // Page number matches panel sequence position
+            panel.stickerPage = index + 1;
           } else {
             const lastIndex = stickerFiles.length - 1;
             panel.stickerFileName = stickerFiles[lastIndex] || null;
@@ -409,7 +438,6 @@ app.post("/api/upload", upload.fields([
 
   } catch (error) {
     console.error('Upload error:', error);
-    // Clean up files on error
     try {
       if (req.files) {
         Object.keys(req.files).forEach(key => {
@@ -508,7 +536,6 @@ app.delete("/api/projects/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "Project not found" });
     }
 
-    // Delete sticker files
     const stickersDir = path.join('./uploads', 'stickers');
     project.panels.forEach(panel => {
       if (panel.stickerFileName) {
@@ -558,7 +585,6 @@ app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
 
     console.log(`📄 Serving sticker: ${panel.stickerFileName} for panel ${panelId} (Page ${panel.stickerPage})`);
 
-    // Send the original PDF file
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="sticker_${panelId}.pdf"`);
     res.setHeader('Cache-Control', 'no-cache');
@@ -580,7 +606,6 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
 
-    // Sort panels by sequence number (ascending)
     const sortedPanels = [...project.panels].sort((a, b) => {
       const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
       const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
@@ -598,7 +623,6 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
         .header{text-align:center;padding:15px;background:white;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 4px rgba(0,0,0,0.1);}
         .header h1{font-size:20px;color:#1a1a2e;}
         .header p{color:#666;font-size:14px;margin-top:4px;}
-        .header .matched-count{color:#8b5cf6;font-weight:bold;}
         .sticker-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;max-width:1200px;margin:0 auto;}
         .sticker{background:white;padding:12px;border:2px solid #333;border-radius:6px;page-break-inside:avoid;min-height:160px;box-shadow:0 2px 4px rgba(0,0,0,0.05);}
         .sticker-header{font-weight:bold;font-size:14px;border-bottom:2px solid #333;padding-bottom:6px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;}
@@ -621,7 +645,7 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
     <body>
       <div class="header">
         <h1>📋 ${project.name}</h1>
-        <p>Total Panels: ${project.panels.length} | Matched: <span class="matched-count">${project.matchedCount || 0}</span> | Price: ₹${project.totalPrice.toLocaleString()}</p>
+        <p>Total Panels: ${project.panels.length} | Matched: ${project.matchedCount || 0} | Price: ₹${project.totalPrice.toLocaleString()}</p>
       </div>
       <div class="sticker-grid">
     `;
@@ -679,5 +703,4 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 API URL: http://localhost:${PORT}`);
-  console.log(`📡 Socket URL: http://localhost:${PORT}`);
 });
