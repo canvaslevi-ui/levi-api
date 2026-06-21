@@ -6,14 +6,13 @@ const http = require("http");
 const { Server } = require("socket.io");
 const multer = require("multer");
 const XLSX = require("xlsx");
-const PDFParse = require("pdf-parse");
 const fs = require("fs");
 const path = require("path");
 const { PDFDocument } = require('pdf-lib');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // ===== SERVER + SOCKET =====
 const server = http.createServer(app);
@@ -51,7 +50,10 @@ const PanelSchema = new mongoose.Schema({
   totalGroupQty: Number,
   price: { type: Number, default: 0 },
   stickerPage: { type: Number },
-  stickerFileName: { type: String }
+  stickerFileName: { type: String },
+  matched: { type: Boolean, default: false },
+  ocrPanel: { type: Number },
+  ocrPage: { type: Number }
 });
 
 const ProjectSchema = new mongoose.Schema({
@@ -59,7 +61,8 @@ const ProjectSchema = new mongoose.Schema({
   panels: [PanelSchema],
   createdAt: { type: Date, default: Date.now },
   totalPrice: { type: Number, default: 0 },
-  stickerCount: { type: Number, default: 0 }
+  stickerCount: { type: Number, default: 0 },
+  matchedCount: { type: Number, default: 0 }
 });
 
 ProjectSchema.index({ name: 1 });
@@ -71,7 +74,10 @@ io.on("connection", () => {
   console.log("⚡ Client Connected");
 });
 
-// ===== HELPER FUNCTIONS =====
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
+
 function normalize(id) {
   return String(id).replace("#", "").trim();
 }
@@ -182,7 +188,10 @@ async function splitPDFIntoStickers(pdfPath, panelCount) {
   }
 }
 
-// ===== FILE UPLOAD CONFIG =====
+// ==========================================
+// FILE UPLOAD CONFIG
+// ==========================================
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadDir = './uploads/';
@@ -223,7 +232,7 @@ app.post("/api/upload", upload.fields([
   { name: 'pdf', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { projectName } = req.body;
+    const { projectName, matchedData } = req.body;
     
     if (!projectName) {
       return res.status(400).json({ 
@@ -240,6 +249,17 @@ app.post("/api/upload", upload.fields([
         success: false, 
         message: 'Excel/CSV file required' 
       });
+    }
+
+    // Parse matched data from frontend
+    let matchedPanels = [];
+    try {
+      if (matchedData) {
+        matchedPanels = JSON.parse(matchedData);
+        console.log(`📊 Received ${matchedPanels.length} matched panels from OCR`);
+      }
+    } catch (e) {
+      console.error('Failed to parse matched data:', e);
     }
 
     // ===== PROCESS EXCEL =====
@@ -273,6 +293,7 @@ app.post("/api/upload", upload.fields([
     const qtyIdx = headers.findIndex(h => h.includes('qty') || h.includes('quantity'));
 
     let panels = [];
+    let panelIndex = 0;
 
     for (let i = headerIndex + 1; i < rows.length; i++) {
       const row = rows[i];
@@ -288,6 +309,19 @@ app.post("/api/upload", upload.fields([
 
       ids.forEach((id, index) => {
         const price = getPanelPrice(length, width);
+        
+        // Check if this panel was matched by OCR
+        let matched = false;
+        let ocrPanel = null;
+        let ocrPage = null;
+        
+        if (matchedPanels && matchedPanels.length > panelIndex) {
+          const matchData = matchedPanels[panelIndex] || {};
+          matched = matchData.matched || false;
+          ocrPanel = matchData.ocrPanel || null;
+          ocrPage = matchData.page || null;
+        }
+        
         panels.push({
           id: id,
           status: 'pending',
@@ -297,8 +331,12 @@ app.post("/api/upload", upload.fields([
             seq: index + 1
           }],
           totalGroupQty: qty,
-          price: price
+          price: price,
+          matched: matched,
+          ocrPanel: ocrPanel,
+          ocrPage: ocrPage
         });
+        panelIndex++;
       });
     }
 
@@ -315,13 +353,16 @@ app.post("/api/upload", upload.fields([
 
     if (pdfFile) {
       try {
+        // The PDF is already rearranged by the frontend
+        // So we split it in order (page 1 = panel 1, page 2 = panel 2, etc.)
         stickerFiles = await splitPDFIntoStickers(pdfFile.path, panels.length);
         stickerCount = stickerFiles.length;
         
+        // Assign stickers in order - panels are already sorted by sequence
         panels.forEach((panel, index) => {
           if (index < stickerFiles.length) {
             panel.stickerFileName = stickerFiles[index];
-            panel.stickerPage = index + 1;
+            panel.stickerPage = index + 1; // Page number matches panel sequence position
           } else {
             const lastIndex = stickerFiles.length - 1;
             panel.stickerFileName = stickerFiles[lastIndex] || null;
@@ -334,12 +375,14 @@ app.post("/api/upload", upload.fields([
     }
 
     const totalPrice = panels.reduce((sum, p) => sum + (p.price || 0), 0);
+    const matchedCount = panels.filter(p => p.matched).length;
 
     const project = new Project({
       name: projectName,
       panels: panels,
       totalPrice: totalPrice,
-      stickerCount: stickerCount
+      stickerCount: stickerCount,
+      matchedCount: matchedCount
     });
 
     await project.save();
@@ -361,7 +404,7 @@ app.post("/api/upload", upload.fields([
     res.json({
       success: true,
       project: project,
-      message: `Uploaded ${panels.length} panels with ${stickerCount} stickers`
+      message: `Uploaded ${panels.length} panels with ${matchedCount} matched via OCR`
     });
 
   } catch (error) {
@@ -429,7 +472,7 @@ app.put("/api/projects/:id/status", async (req, res) => {
 
     const project = await Project.findById(req.params.id);
     if (!project) {
-      return res.status(404).json({ success: false });
+      return res.status(404).json({ success: false, message: "Project not found" });
     }
 
     let found = false;
@@ -441,7 +484,7 @@ app.put("/api/projects/:id/status", async (req, res) => {
     });
 
     if (!found) {
-      return res.json({ success: false, message: "Panel not found" });
+      return res.status(404).json({ success: false, message: "Panel not found" });
     }
 
     await project.save();
@@ -462,7 +505,7 @@ app.delete("/api/projects/:id", async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     if (!project) {
-      return res.status(404).json({ success: false });
+      return res.status(404).json({ success: false, message: "Project not found" });
     }
 
     // Delete sticker files
@@ -488,7 +531,7 @@ app.delete("/api/projects/:id", async (req, res) => {
 });
 
 // ==========================================
-// GET INDIVIDUAL STICKER - ORIGINAL PDF
+// GET INDIVIDUAL STICKER
 // ==========================================
 app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
   try {
@@ -513,11 +556,11 @@ app.get("/api/projects/:id/sticker/:panelId", async (req, res) => {
       return res.status(404).json({ success: false, message: 'Sticker file not found' });
     }
 
-    console.log(`📄 Serving sticker: ${panel.stickerFileName} for panel ${panelId}`);
+    console.log(`📄 Serving sticker: ${panel.stickerFileName} for panel ${panelId} (Page ${panel.stickerPage})`);
 
     // Send the original PDF file
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${panel.stickerFileName}"`);
+    res.setHeader('Content-Disposition', `inline; filename="sticker_${panelId}.pdf"`);
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.resolve(stickerPath));
 
@@ -537,6 +580,13 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
 
+    // Sort panels by sequence number (ascending)
+    const sortedPanels = [...project.panels].sort((a, b) => {
+      const numA = parseInt(String(a.id).replace(/[^0-9]/g, '')) || 0;
+      const numB = parseInt(String(b.id).replace(/[^0-9]/g, '')) || 0;
+      return numA - numB;
+    });
+
     let html = `
     <!DOCTYPE html>
     <html>
@@ -548,6 +598,7 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
         .header{text-align:center;padding:15px;background:white;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 4px rgba(0,0,0,0.1);}
         .header h1{font-size:20px;color:#1a1a2e;}
         .header p{color:#666;font-size:14px;margin-top:4px;}
+        .header .matched-count{color:#8b5cf6;font-weight:bold;}
         .sticker-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;max-width:1200px;margin:0 auto;}
         .sticker{background:white;padding:12px;border:2px solid #333;border-radius:6px;page-break-inside:avoid;min-height:160px;box-shadow:0 2px 4px rgba(0,0,0,0.05);}
         .sticker-header{font-weight:bold;font-size:14px;border-bottom:2px solid #333;padding-bottom:6px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;}
@@ -559,6 +610,9 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
         .sticker-barcode{margin-top:8px;text-align:center;font-family:'Courier New',monospace;font-size:18px;letter-spacing:3px;padding:4px;background:#f8f8f8;border-radius:4px;}
         .sticker-footer{margin-top:8px;font-size:9px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:6px;}
         .sticker .price{color:#22c55e;font-weight:bold;}
+        .sticker .matched-badge{color:#8b5cf6;font-weight:bold;font-size:11px;}
+        .sticker .sticker-page{color:#3b82f6;font-size:11px;}
+        .matched-highlight{border-color:#8b5cf6;background:#f8f0ff;}
         @media print{body{background:white;padding:10px;} .sticker{border:1px solid #999;box-shadow:none;} .sticker-grid{gap:10px;}}
         @media (max-width:768px){.sticker-grid{grid-template-columns:repeat(2,1fr);}}
         @media (max-width:480px){.sticker-grid{grid-template-columns:1fr;}}
@@ -567,12 +621,12 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
     <body>
       <div class="header">
         <h1>📋 ${project.name}</h1>
-        <p>Total Panels: ${project.panels.length} | Total Price: ₹${project.totalPrice.toLocaleString()} | Stickers: ${project.stickerCount || 0}</p>
+        <p>Total Panels: ${project.panels.length} | Matched: <span class="matched-count">${project.matchedCount || 0}</span> | Price: ₹${project.totalPrice.toLocaleString()}</p>
       </div>
       <div class="sticker-grid">
     `;
 
-    project.panels.forEach(panel => {
+    sortedPanels.forEach((panel) => {
       const item = panel.items[0];
       const statusColors = {
         pending: '#f59e0b',
@@ -580,8 +634,11 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
         dispatched: '#10b981'
       };
       
+      const isMatched = panel.matched;
+      const matchedClass = isMatched ? 'matched-highlight' : '';
+      
       html += `
-        <div class="sticker">
+        <div class="sticker ${matchedClass}">
           <div class="sticker-header">
             <span class="id">${panel.id}</span>
             <span class="status" style="background:${statusColors[panel.status] || '#999'};color:white;">${panel.status}</span>
@@ -590,7 +647,8 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
             <div><span class="label">Dimensions:</span> <span class="value">${item.length} × ${item.width} mm</span></div>
             <div><span class="label">Quantity:</span> <span class="value">${panel.totalGroupQty || 1}</span></div>
             <div><span class="label">Price:</span> <span class="value price">₹${panel.price || 0}</span></div>
-            <div><span class="label">Page:</span> <span class="value">${panel.stickerPage || 'N/A'}</span></div>
+            <div><span class="label">Sticker Page:</span> <span class="sticker-page">${panel.stickerPage || 'N/A'}</span></div>
+            ${isMatched ? `<div><span class="matched-badge">✅ OCR Matched #${panel.ocrPanel || ''}</span></div>` : ''}
           </div>
           <div class="sticker-barcode">${panel.id.replace('#', '')}</div>
           <div class="sticker-footer">${project.name} | ${new Date().toLocaleDateString('en-IN')}</div>
@@ -621,4 +679,5 @@ app.get("/api/projects/:id/print-stickers", async (req, res) => {
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📡 API URL: http://localhost:${PORT}`);
+  console.log(`📡 Socket URL: http://localhost:${PORT}`);
 });
